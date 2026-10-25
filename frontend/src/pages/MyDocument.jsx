@@ -38,7 +38,8 @@ import {
   Printer,
   Edit3,
   Image as ImageIcon,
-  Loader2
+  Loader2,
+  ShieldAlert
 } from 'lucide-react';
 import JoditEditor from 'jodit-react';
 import html2canvas from 'html2canvas';
@@ -295,7 +296,7 @@ const buildMyDocumentRow = (submission, latestLog, user, activeSy, subtypesMap =
 export const MyDocuments = () => {
   const navigate = useNavigate();
   const location = useLocation();
-  const { user, refreshUser } = useAuth();
+  const { user, refreshUser, isReadOnlyAdmin, hasPermission } = useAuth();
 
   const [showSuspendedModal, setShowSuspendedModal] = React.useState(false);
   const [adminEmail, setAdminEmail] = React.useState('');
@@ -1637,6 +1638,10 @@ export const MyDocuments = () => {
   };
 
   const handleApproveAttachment = async () => {
+    if (isReadOnlyAdmin) {
+      showToast('Action disabled: Handed-over administrator account is in Read-Only mode.');
+      return;
+    }
     if (!previewFile || !selectedDoc) return;
     const roleNorm = String(user?.role || '').toLowerCase().trim();
     if (!roleNorm || roleNorm === 'org-president' || roleNorm === 'chairman' || roleNorm === 'vice chairman' || roleNorm === 'vice-chairman' || roleNorm === 'dean') {
@@ -1985,7 +1990,8 @@ export const MyDocuments = () => {
 
       // Org President view: show their own submissions (including drafts)
       const userRoleNorm = String(user?.role || '').toLowerCase().replace(/[_-]/g, ' ').trim();
-      const isOrgPres = userRoleNorm === 'org president' || userRoleNorm === 'student';
+      const isStaffOrAdmin = ['admin', 'chairman', 'vice chairman', 'sds coordinator', 'oso staff'].some(r => userRoleNorm.includes(r));
+      const isOrgPres = !isStaffOrAdmin && (userRoleNorm === 'org president' || userRoleNorm === 'student' || hasPermission('documents.submit'));
 
       if (isOrgPres) {
         const { data: subs, error: subsErr } = await supabase
@@ -2172,6 +2178,10 @@ export const MyDocuments = () => {
   }, [selectedDoc?.id]);
 
   const handleReturnSubmission = async (comments = '') => {
+    if (isReadOnlyAdmin) {
+      showToast('Action disabled: Handed-over administrator account is in Read-Only mode.');
+      return;
+    }
     if (!selectedDoc) return;
     try {
       setLoading(true);
@@ -2425,6 +2435,10 @@ export const MyDocuments = () => {
   };
 
   const handleDisapproveSubmission = async (comments = '') => {
+    if (isReadOnlyAdmin) {
+      showToast('Action disabled: Handed-over administrator account is in Read-Only mode.');
+      return;
+    }
     if (!selectedDoc) return;
     try {
       setLoading(true);
@@ -2637,6 +2651,10 @@ export const MyDocuments = () => {
   };
 
   const handleApproveSubmission = async (comments = '') => {
+    if (isReadOnlyAdmin) {
+      showToast('Action disabled: Handed-over administrator account is in Read-Only mode.');
+      return;
+    }
     if (!selectedDoc) return;
     try {
       setLoading(true);
@@ -6998,7 +7016,7 @@ export const MyDocuments = () => {
           const isReportReturn = Boolean(reportReturnInfo?.isReturned);
 
           // Accomplishment and financial reports cannot be disapproved
-          if (isReportReturn) {
+          if (isReportReturn || isReadOnlyAdmin) {
             return null;
           }
 
@@ -7033,6 +7051,18 @@ export const MyDocuments = () => {
              (userRoleNorm === 'org-president' && (isApprovedDoc || isSdsStage || currentStage === 'DOCUMENT_RETRIEVAL')));
 
           if (!canViewActions) return null;
+          if (isReadOnlyAdmin) {
+            return (
+              <div className="fixed bottom-4 sm:bottom-10 left-1/2 -translate-x-1/2 z-[100] w-[92vw] sm:w-auto">
+                <div className="bg-amber-600/95 text-white backdrop-blur-2xl px-6 py-4 rounded-2xl sm:rounded-[2rem] border border-amber-400 shadow-2xl flex items-center justify-center gap-3 animate-in slide-in-from-bottom-12 duration-500">
+                  <ShieldAlert size={20} className="text-amber-200 shrink-0" />
+                  <span className="font-bold text-xs uppercase tracking-wider">
+                    Read-Only Mode: Primary Administrator ownership transferred. Document decision actions are view-only.
+                  </span>
+                </div>
+              </div>
+            );
+          }
 
           const currentAttachments = attachments || selectedDoc?.attachments || currentVersion?.submission_attachments || [];
           const RETURN_REASONS = ['missing-requirements', 'incorrect-format', 'incomplete-information', 'others'];
@@ -7774,6 +7804,16 @@ export const MyDocuments = () => {
                             <FileText size={20} className="text-gray-400 mx-auto mb-2" />
                             <p className="text-xs font-bold text-gray-600 uppercase tracking-wider">Read Only</p>
                             <p className="text-xs text-gray-500 mt-1">Attachment review actions are not available for this document.</p>
+                          </div>
+                        );
+                      }
+
+                      if (isReadOnlyAdmin) {
+                        return (
+                          <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-center mt-6">
+                            <ShieldAlert size={20} className="text-amber-500 mx-auto mb-2" />
+                            <p className="text-xs font-bold text-amber-700 uppercase tracking-wider">Read-Only Mode</p>
+                            <p className="text-xs text-amber-600 mt-1">Review actions are disabled because administrator ownership has been transferred.</p>
                           </div>
                         );
                       }

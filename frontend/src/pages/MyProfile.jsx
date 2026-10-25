@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 
 import { apiFetch } from '../config/api';
+import { logAuditEvent } from '../services/auditService';
 
 import OrgProfileHeader from '../components/profile/OrgProfileHeader';
 import IdentityPanel from '../components/profile/IdentityPanel';
@@ -214,18 +215,22 @@ const MyProfile = () => {
     }
   };
 
-  const createAuditLog = async (description) => {
+  const createAuditLog = async (actionType, actionLabel, details = {}) => {
     try {
-      const { error } = await supabase.from('submission_logs').insert([{
-        user_id: user.id,
-        action_type: 'Profile Update',
-        description: description,
-      }]);
-      if (error) {
-        console.warn('Could not create audit log:', error);
-      }
+      await logAuditEvent({
+        module: 'PROFILE',
+        action_type: actionType,
+        action_label: actionLabel,
+        target_id: user?.id,
+        target_name: user?.full_name || user?.name || user?.email,
+        details: {
+          ...details,
+          organization_name: user?.organization_name || user?.org_name,
+        },
+        user,
+      });
     } catch (err) {
-      console.warn('Audit log error:', err);
+      console.warn('[Audit Log] Profile audit log error:', err);
     }
   };
 
@@ -266,7 +271,10 @@ const MyProfile = () => {
 
       if (updateError) throw updateError;
 
-      await createAuditLog('Updated profile picture');
+      await createAuditLog('PROFILE_AVATAR_UPDATED', 'Updated profile picture', {
+        file_name: file.name,
+        file_size_kb: Math.round(compressed.size / 1024),
+      });
       await refreshUser(Date.now());
       showToast('Profile picture updated successfully!');
     } catch (err) {
@@ -391,7 +399,14 @@ const MyProfile = () => {
         }
       }
 
-      await createAuditLog(`Updated profile details: ${fullName.trim()}`);
+      await createAuditLog('PROFILE_UPDATED', `Updated profile details: ${fullName.trim()}`, {
+        full_name: fullName.trim(),
+        contact_no: contactNumber?.trim() || null,
+        abbreviation: payload.abbreviation || null,
+        student_no: payload.student_no || null,
+        adviser_name: payload.adviser_name || null,
+        no_member: payload.no_member || null,
+      });
       await fetchUserDetail(user.id, selectedSyId);
       await refreshUser();
       showToast('Profile and academic year details updated successfully!');
@@ -437,7 +452,9 @@ const MyProfile = () => {
 
       if (updateError) throw updateError;
 
-      await createAuditLog('Changed account password');
+      await createAuditLog('PASSWORD_CHANGED', 'Changed account security password', {
+        user_email: user?.email,
+      });
       showToast('Password changed successfully!');
       return { success: true };
     } catch (err) {
@@ -509,6 +526,12 @@ const MyProfile = () => {
         }
 
         if (error) throw error;
+        await createAuditLog('OFFICER_UPDATED', `Updated executive officer "${memberForm.full_name.trim()}" (${resolvedPosition})`, {
+          officer_name: memberForm.full_name.trim(),
+          position: resolvedPosition,
+          student_number: memberForm.student_number?.trim() || null,
+          contact_number: rawContact || null,
+        });
         showToast('Executive member updated successfully!');
       } else {
         const insertPayload = {
@@ -532,6 +555,12 @@ const MyProfile = () => {
         }
 
         if (error) throw error;
+        await createAuditLog('OFFICER_ADDED', `Added executive officer "${memberForm.full_name.trim()}" (${resolvedPosition})`, {
+          officer_name: memberForm.full_name.trim(),
+          position: resolvedPosition,
+          student_number: memberForm.student_number?.trim() || null,
+          contact_number: rawContact || null,
+        });
         showToast('Executive member added successfully!');
       }
 
@@ -580,6 +609,15 @@ const MyProfile = () => {
         .eq('id', memberToDelete.id);
 
       if (error) throw error;
+      await createAuditLog(
+        'OFFICER_REMOVED',
+        `Removed executive officer "${memberToDelete.full_name}" (${memberToDelete.position || 'Officer'})`,
+        {
+          officer_name: memberToDelete.full_name,
+          position: memberToDelete.position,
+          student_number: memberToDelete.student_number || null,
+        }
+      );
       showToast('Executive member removed.');
       setIsDeleteMemberModalOpen(false);
       setMemberToDelete(null);

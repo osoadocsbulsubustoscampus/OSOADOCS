@@ -3,6 +3,7 @@ import { KeyRound, Loader2, Check, Lock, Shield } from 'lucide-react';
 import { SectionCard } from './SectionCard';
 import { supabase } from '../../supabaseClient';
 import { useAuth } from '../../context/AuthContext';
+import { logAuditEvent } from '../../services/auditService';
 
 const inputClass =
   'w-full rounded-lg border border-line bg-white px-3 py-2.5 text-sm text-ink outline-none transition-colors duration-150 placeholder:text-ink-faint focus:border-forest-400 focus:ring-2 focus:ring-forest-100';
@@ -129,6 +130,21 @@ export function SecurityPanel({ onChangePassword, isSaving = false, isPresident 
           }
         }
       }
+
+      try {
+        await logAuditEvent({
+          module: 'PROFILE',
+          action_type: 'SECURITY_PIN_UPDATED',
+          action_label: `Updated security PIN for "${user?.full_name || user?.name || user?.email}"`,
+          target_id: user?.id,
+          target_name: user?.full_name || user?.name || user?.email,
+          details: {
+            is_president: !!activeMember?.is_president,
+            officer_position: activeMember?.position || null,
+          },
+          user,
+        });
+      } catch (_) {}
 
       setPinStatus('success');
       setPinMessage('Security PIN updated successfully!');

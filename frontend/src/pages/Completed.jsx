@@ -101,7 +101,7 @@ const FilterDropdown = ({ label, value, options, onChange, isOpen, onToggle, act
     )}
   </div>
 );const Completed = () => {
-  const { user, activeMember } = useAuth();
+  const { user, activeMember, hasPermission } = useAuth();
   const location = useLocation();
   const [loading, setLoading] = React.useState(true);
   const [selectedSubmissionId, setSelectedSubmissionId] = React.useState(null);
@@ -117,7 +117,8 @@ const FilterDropdown = ({ label, value, options, onChange, isOpen, onToggle, act
   const [openFilter, setOpenFilter] = React.useState(null);
 
   const role = String(user?.role || '').toLowerCase();
-  const isOrgPresident = role === 'org-president';
+  const isStaffOrAdmin = ['admin', 'chairman', 'vice-chairman', 'vice chairman', 'sds-coordinator', 'oso-staff', 'oso staff'].some(r => role.includes(r));
+  const isOrgPresident = !isStaffOrAdmin && (role === 'org-president' || hasPermission('documents.submit'));
 
   const [isReportOpen, setIsReportOpen] = React.useState(false);
   const [reportData, setReportData] = React.useState({ title: '', stats: [], headers: [], rows: [], secondHeaders: null, secondRows: null, secondTitle: '', filename: '' });

@@ -1,10 +1,12 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { supabase } from '../supabaseClient';
+import { apiFetch } from '../config/api';
 
 const AuthContext = createContext();
 
 export const AuthProvider = ({ children }) => {
     const [user, setUser] = useState(null);
+    const [roles, setRoles] = useState([]);
     const [loading, setLoading] = useState(true);
     const [activeMember, setActiveMemberState] = useState(() => {
         try {
@@ -14,6 +16,36 @@ export const AuthProvider = ({ children }) => {
             return null;
         }
     });
+
+    const fetchRoles = useCallback(async () => {
+        try {
+            const res = await apiFetch('/api/roles');
+            if (res && res.ok) {
+                const data = await res.json();
+                if (Array.isArray(data) && data.length > 0) {
+                    setRoles(data);
+                    return data;
+                }
+            }
+        } catch (err) {
+            console.warn('API fetchRoles warning:', err);
+        }
+
+        // Direct database query fallback
+        try {
+            const { data, error } = await supabase
+                .from('roles')
+                .select('*')
+                .order('is_system', { ascending: false });
+            if (!error && Array.isArray(data) && data.length > 0) {
+                setRoles(data);
+                return data;
+            }
+        } catch (dbErr) {
+            console.warn('Direct roles query error:', dbErr);
+        }
+        return [];
+    }, []);
 
     const setActiveMember = (member) => {
         setActiveMemberState(member);
@@ -46,6 +78,7 @@ export const AuthProvider = ({ children }) => {
 
         const initializeAuth = async () => {
             try {
+                await fetchRoles();
                 const { data: { session } } = await supabase.auth.getSession();
                 if (session) {
                     await fetchProfile(session.user);
@@ -258,8 +291,64 @@ export const AuthProvider = ({ children }) => {
         }
     };
 
+    const isReadOnlyAdmin = Boolean(user?.role === 'admin' && user?.status === 'Handed Over (Read-Only)');
+
+    const hasPermission = useCallback((permissionKey) => {
+        if (!user) return false;
+
+        // Strict security constraint: Handed Over (Read-Only) Admin accounts can only view
+        if (isReadOnlyAdmin) {
+            return typeof permissionKey === 'string' && permissionKey.endsWith('.view');
+        }
+
+        // Active Primary Administrator has full authority (except student-only submission capability)
+        if (user.role === 'admin' && user.status === 'Active') {
+            if (permissionKey === 'documents.submit') return false;
+            return true;
+        }
+
+        // Look up role in loaded roles catalog
+        const userRole = roles.find((r) => r.slug === user.role);
+        if (!userRole) {
+            // Safety fallback before roles load
+            if (user.role === 'org-president') {
+                return ['documents.submit', 'academic.view', 'announcements.view', 'requirements.view'].includes(permissionKey);
+            }
+            if (user.role === 'chairman' || user.role === 'vice-chairman') {
+                return [
+                    'documents.view', 'documents.evaluate', 'documents.approve', 'documents.return', 'documents.disapprove',
+                    'academic.view', 'announcements.view', 'requirements.view', 'users.view'
+                ].includes(permissionKey);
+            }
+            return false;
+        }
+
+        const rolePerms = Array.isArray(userRole.permissions) ? userRole.permissions : [];
+
+        // Unified evaluation alias: evaluate grants approve, return, and disapprove
+        if (['documents.approve', 'documents.return', 'documents.disapprove', 'documents.evaluate'].includes(permissionKey)) {
+            return rolePerms.some((p) =>
+                ['documents.evaluate', 'documents.approve', 'documents.return', 'documents.disapprove'].includes(p)
+            );
+        }
+
+        return rolePerms.includes(permissionKey);
+    }, [user, isReadOnlyAdmin, roles]);
+
     return (
-        <AuthContext.Provider value={{ user, login, logout, loading, refreshUser, activeMember, setActiveMember }}>
+        <AuthContext.Provider value={{ 
+            user, 
+            isReadOnlyAdmin, 
+            roles, 
+            refreshRoles: fetchRoles, 
+            hasPermission, 
+            login, 
+            logout, 
+            loading, 
+            refreshUser, 
+            activeMember, 
+            setActiveMember 
+        }}>
             {children}
         </AuthContext.Provider>
     );

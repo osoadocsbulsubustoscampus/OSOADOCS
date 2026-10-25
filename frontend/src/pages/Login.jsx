@@ -1,3 +1,4 @@
+import { logAuditEvent } from '../services/auditService';
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
@@ -151,6 +152,14 @@ const Login = () => {
         setFailedAttempts(0);
         setIsLockedOut(false);
         setLoading(false);
+        try {
+          logAuditEvent({
+            module: 'AUTH',
+            action_type: 'USER_LOGIN',
+            action_label: 'User signed in via Trusted Device',
+            details: { email: normalizedEmail, method: 'trusted_device' }
+          });
+        } catch (_) {}
         navigate('/');
       } else {
         // Device is NOT trusted -> send OTP via Brevo and show OTP screen
@@ -282,6 +291,14 @@ const Login = () => {
       setIsLockedOut(false);
       setOtpLoading(false);
       showToast('Security verification successful!', 'success');
+      try {
+        logAuditEvent({
+          module: 'AUTH',
+          action_type: 'USER_LOGIN',
+          action_label: 'User signed in via Security OTP verification',
+          details: { email: normalizedEmail, method: 'email_otp' }
+        });
+      } catch (_) {}
       navigate('/');
     } catch (err) {
       console.error('OTP verification error:', err);

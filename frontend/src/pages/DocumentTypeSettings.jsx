@@ -23,6 +23,7 @@ import {
   ChevronDown,
   ChevronUp,
   Eye,
+  ShieldAlert,
   Paperclip,
 } from 'lucide-react';
 import PageHeader from '../components/PageHeader';
@@ -65,7 +66,7 @@ const formatFileSize = (bytes) => {
 const DocumentTypeSettings = () => {
   const { typeId } = useParams();
   const navigate = useNavigate();
-  const { user } = useAuth();
+  const { user, isReadOnlyAdmin } = useAuth();
   const isNew = typeId === 'new';
   const fileInputRef = useRef(null);
 
@@ -268,6 +269,10 @@ const DocumentTypeSettings = () => {
 
   const handleSaveType = async (e) => {
     e.preventDefault();
+    if (isReadOnlyAdmin) {
+      showToast('Action disabled: Handed-over administrator account is in Read-Only mode.', 'error');
+      return;
+    }
     setIsSaving(true);
     try {
       const payload = {
@@ -347,6 +352,10 @@ const DocumentTypeSettings = () => {
 
   const handleSaveRequirement = async (e) => {
     e.preventDefault();
+    if (isReadOnlyAdmin) {
+      showToast('Action disabled: Handed-over administrator account is in Read-Only mode.', 'error');
+      return;
+    }
     if (!documentType?.id) {
       showToast('Save the category first', 'error');
       return;
@@ -388,11 +397,12 @@ const DocumentTypeSettings = () => {
       };
 
       if (editingReqId) {
-        await reqService.updateRequirement(editingReqId, payload);
+        const existing = requirements.find((r) => r.id === editingReqId);
+        await reqService.updateRequirement(editingReqId, payload, user, existing, 'Updated via Category Settings');
         showToast('Requirement updated');
         await sendRequirementNotifications(reqForm.title, 'updated');
       } else {
-        await reqService.createRequirement({ ...payload, documentTypeID: documentType.id });
+        await reqService.createRequirement({ ...payload, documentTypeID: documentType.id }, user);
         showToast('Requirement created');
         await sendRequirementNotifications(reqForm.title, 'created');
       }
@@ -838,25 +848,34 @@ const DocumentTypeSettings = () => {
           </div>
         </div>
         <div className="flex flex-wrap gap-4 pt-4">
-          <button
-            type="submit"
-            disabled={isSaving}
-            className="px-8 py-4 bg-gray-800 text-white font-black rounded-xl uppercase tracking-widest text-xs flex items-center gap-2"
-          >
-            {isSaving ? <Loader2 size={18} className="animate-spin" /> : <Save size={18} />}
-            {isNew ? 'Create Category' : 'Save Category'}
-          </button>
-          {!isNew && (
-            <button
-              type="button"
-              onClick={() => requestDelete({ type: 'category' })}
-              className="px-8 py-4 bg-red-50 text-red-600 font-black rounded-xl uppercase tracking-widest text-xs flex items-center gap-2 hover:bg-red-100"
-            >
-              <Trash2 size={18} />
-              Delete Category
-            </button>
-          )}
+          {isReadOnlyAdmin ? (
+            <div className="flex items-center gap-2 px-4 py-3 bg-amber-50 border border-amber-200 text-amber-800 rounded-xl text-xs font-bold">
+              <ShieldAlert size={16} className="text-amber-600 shrink-0" />
+              <span>Viewing mode only: Primary administrator permissions were handed over.</span>
             </div>
+          ) : (
+            <>
+              <button
+                type="submit"
+                disabled={isSaving}
+                className="px-8 py-4 bg-gray-800 text-white font-black rounded-xl uppercase tracking-widest text-xs flex items-center gap-2 hover:bg-gray-700 transition"
+              >
+                {isSaving ? <Loader2 size={18} className="animate-spin" /> : <Save size={18} />}
+                {isNew ? 'Create Category' : 'Save Category'}
+              </button>
+              {!isNew && (
+                <button
+                  type="button"
+                  onClick={() => requestDelete({ type: 'category' })}
+                  className="px-8 py-4 bg-red-50 text-red-600 font-black rounded-xl uppercase tracking-widest text-xs flex items-center gap-2 hover:bg-red-100"
+                >
+                  <Trash2 size={18} />
+                  Delete Category
+                </button>
+              )}
+            </>
+          )}
+        </div>
           </form>
         )}
       </div>

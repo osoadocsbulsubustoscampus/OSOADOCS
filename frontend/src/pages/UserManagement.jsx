@@ -1,3 +1,4 @@
+import { logAuditEvent } from '../services/auditService';
 import React, { useState, useEffect } from 'react';
 import {
   UserPlus,
@@ -29,7 +30,15 @@ import {
   UserCheck,
   RotateCcw,
   BookOpen,
-  Sparkles
+  Sparkles,
+  UserX,
+  ShieldCheck,
+  ArrowRightLeft,
+  ShieldAlert,
+  Key,
+  CheckSquare,
+  Square,
+  Sliders
 } from 'lucide-react';
 import PageHeader from '../components/PageHeader';
 import { useAuth } from '../context/AuthContext';
@@ -39,6 +48,7 @@ import ReportPreviewModal from '../components/ReportPreviewModal';
 import CompletedDocumentDetail from '../components/CompletedDocumentDetail';
 import { useToast } from '../hooks/useToast';
 import { supabase } from '../supabaseClient';
+import { PERMISSION_GROUPS, ALL_PERMISSIONS, formatRoleName } from '../utils/permissions';
 
 const parseCoAdvisersList = (val) => {
   if (Array.isArray(val)) return val;
@@ -113,7 +123,42 @@ const UserManagement = () => {
   const [isReportOpen, setIsReportOpen] = useState(false);
   const [reportData, setReportData] = useState({ title: '', stats: [], headers: [], rows: [], filename: '' });
 
-  const { user: currentUser } = useAuth();
+  const { user: currentUser, roles = [], refreshRoles, hasPermission } = useAuth();
+  const isReadOnlyAdmin = currentUser?.status === 'Handed Over (Read-Only)';
+
+  // Roles & Permissions Management State
+  const [roleSearchQuery, setRoleSearchQuery] = useState('');
+  const [isCreateRoleModalOpen, setIsCreateRoleModalOpen] = useState(false);
+  const [isEditRoleModalOpen, setIsEditRoleModalOpen] = useState(false);
+  const [selectedRoleForEdit, setSelectedRoleForEdit] = useState(null);
+  const [roleFormData, setRoleFormData] = useState({
+    name: '',
+    slug: '',
+    description: '',
+    permissions: [],
+  });
+  const [isSavingRole, setIsSavingRole] = useState(false);
+  const [roleToDelete, setRoleToDelete] = useState(null);
+  const [isDeleteRoleModalOpen, setIsDeleteRoleModalOpen] = useState(false);
+  const [isDeletingRole, setIsDeletingRole] = useState(false);
+
+  // Admin Ownership Transfer State
+  const [isTransferModalOpen, setIsTransferModalOpen] = useState(false);
+  const [transferForm, setTransferForm] = useState({
+    successorName: '',
+    successorEmail: '',
+    successorContact: '',
+    adminPassword: '',
+  });
+  const [isTransferring, setIsTransferring] = useState(false);
+  const [transferError, setTransferError] = useState('');
+
+  // Deactivate Former Admin State
+  const [isDeactivateFormerModalOpen, setIsDeactivateFormerModalOpen] = useState(false);
+  const [formerAdminToDeactivate, setFormerAdminToDeactivate] = useState(null);
+  const [deactivateFormerPassword, setDeactivateFormerPassword] = useState('');
+  const [isDeactivatingFormer, setIsDeactivatingFormer] = useState(false);
+  const [deactivateFormerError, setDeactivateFormerError] = useState('');
 
   // Form State
   const [formData, setFormData] = useState({
@@ -173,7 +218,14 @@ const UserManagement = () => {
 
   useEffect(() => {
     fetchSchoolYears();
-  }, []);
+    refreshRoles?.();
+  }, [refreshRoles]);
+
+  useEffect(() => {
+    if (activeTab === 'roles') {
+      refreshRoles?.();
+    }
+  }, [activeTab, refreshRoles]);
 
   useEffect(() => {
     fetchUsers();
@@ -385,6 +437,24 @@ const UserManagement = () => {
         setIsSuspendModalOpen(false);
         setSuccessMessage(isCurrentlySuspended ? 'Account has been successfully reactivated!' : 'Account has been successfully suspended!');
         setIsSuccessModalOpen(true);
+
+        try {
+          logAuditEvent({
+            module: 'USERS',
+            action_type: isCurrentlySuspended ? 'USER_REACTIVATED' : 'USER_SUSPENDED',
+            action_label: `${isCurrentlySuspended ? 'Reactivated' : 'Suspended'} user account "${suspendUser.full_name || suspendUser.email}"`,
+            target_id: String(suspendUser.id),
+            target_name: suspendUser.full_name || suspendUser.email,
+            details: {
+              previous_status: suspendUser.status,
+              new_status: newStatus,
+              user_role: suspendUser.role,
+              organization_name: suspendUser.org_name,
+            },
+            user: currentUser,
+          });
+        } catch (_) {}
+
         fetchUsers();
         fetchUserDetail(suspendUser.id);
       } else {
@@ -398,7 +468,11 @@ const UserManagement = () => {
   };
 
   const handleDeleteClick = (user) => {
-    if (user?.has_submissions) {
+    if (user?.id === currentUser?.id) {
+      showToast('Error: You cannot delete your own administrator account', 'error');
+      return;
+    }
+    if (user?.has_submissions && user?.status !== 'Pending Setup' && user?.status !== 'Pending Handover') {
       showToast('Error: Cannot delete account with active document submissions in the system', 'error');
       return;
     }
@@ -459,6 +533,22 @@ const UserManagement = () => {
 
         setSuccessMessage('User account has been successfully deleted!');
         setIsSuccessModalOpen(true);
+
+        try {
+          logAuditEvent({
+            module: 'USERS',
+            action_type: 'USER_DELETED',
+            action_label: `Deleted user account "${userToDelete.full_name || userToDelete.email || userToDelete.org_name}"`,
+            target_id: String(deletedId),
+            target_name: userToDelete.full_name || userToDelete.email || userToDelete.org_name,
+            details: {
+              deleted_user_email: userToDelete.email,
+              deleted_user_role: userToDelete.role,
+              organization_name: userToDelete.org_name,
+            },
+            user,
+          });
+        } catch (_) {}
 
         // Fetch fresh data from backend
         await fetchUsers();
@@ -535,11 +625,11 @@ const UserManagement = () => {
 
       const dateStr = new Date().toISOString().split('T')[0];
       setReportData({
-        title: 'OSO Personnel Accounts Report',
+        title: 'OSOA Personnel Accounts Report',
         stats,
         headers: tableHeaders,
         rows: tableData,
-        filename: `OSO_Personnel_Report_${dateStr}.pdf`,
+        filename: `OSOA_Personnel_Report_${dateStr}.pdf`,
         personInCharge: currentUser?.full_name || 'System Administrator'
       });
     }
@@ -655,6 +745,42 @@ const UserManagement = () => {
         setIsAdminModalOpen(false);
         setSuccessMessage(isEditMode ? 'User account has been successfully updated!' : 'New user account has been successfully created!');
         setIsSuccessModalOpen(true);
+
+        try {
+          if (isEditMode) {
+            logAuditEvent({
+              module: 'PROFILE',
+              action_type: 'USER_PROFILE_MODIFIED',
+              action_label: `Admin updated account profile for "${payload.full_name || selectedUser?.full_name || editingUserId}"`,
+              target_id: String(editingUserId),
+              target_name: payload.full_name || selectedUser?.full_name || 'User Account',
+              details: {
+                target_user_id: editingUserId,
+                full_name: payload.full_name,
+                role: payload.role,
+                status: payload.status,
+                contact_no: payload.contact_no,
+                organization_name: payload.org_name || selectedUser?.org_name,
+              },
+              user: currentUser,
+            });
+          } else {
+            logAuditEvent({
+              module: 'USERS',
+              action_type: 'USER_CREATED',
+              action_label: `Created new user account for "${payload.full_name}" (${payload.role})`,
+              target_id: String(result.data?.id || ''),
+              target_name: payload.full_name,
+              details: {
+                email: payload.email,
+                role: payload.role,
+                organization_name: payload.org_name,
+              },
+              user: currentUser,
+            });
+          }
+        } catch (_) {}
+
         fetchUsers();
         if (selectedUser?.id === editingUserId) {
           fetchUserDetail(editingUserId);
@@ -738,6 +864,24 @@ const UserManagement = () => {
         setIsRenewModalOpen(false);
         setSuccessMessage(result.message || 'Organization successfully renewed for the selected Academic Year!');
         setIsSuccessModalOpen(true);
+        try {
+          logAuditEvent({
+            module: 'USERS',
+            action_type: 'ORGANIZATION_RENEWED',
+            action_label: `Renewed organization "${renewOrg.org_name || renewOrg.full_name}" for academic year`,
+            target_id: String(renewOrg.organization_id || renewOrg.id),
+            target_name: renewOrg.org_name || renewOrg.full_name,
+            details: {
+              president_name: renewForm.president_name,
+              school_year_id: renewTargetSyId,
+              student_no: renewForm.student_no,
+              contact_no: renewForm.contact_no,
+              adviser_name: renewForm.adviser_name,
+              no_member: renewForm.no_member,
+            },
+            user: currentUser,
+          });
+        } catch (_) {}
         fetchUsers();
       } else {
         showToast('Error: ' + (result.error || 'Failed to renew organization'), 'error');
@@ -768,6 +912,21 @@ const UserManagement = () => {
       });
       const result = await response.json();
       if (result.success) {
+        try {
+          logAuditEvent({
+            module: 'USERS',
+            action_type: 'PERSONNEL_STATUS_CHANGED',
+            action_label: `Changed OSOA personnel status for "${personnelUser.full_name}" to ${newStatus}`,
+            target_id: String(personnelUser.id),
+            target_name: personnelUser.full_name,
+            details: {
+              previous_status: personnelUser.status,
+              new_status: newStatus,
+              role: personnelUser.role,
+            },
+            user: currentUser,
+          });
+        } catch (_) {}
         showToast(`Personnel account status set to ${newStatus}. Submission logs remain preserved.`, 'success');
         fetchUsers();
       } else {
@@ -789,6 +948,20 @@ const UserManagement = () => {
 
       const data = await res.json();
       if (res.ok && data.success) {
+        try {
+          logAuditEvent({
+            module: 'USERS',
+            action_type: 'INVITATION_RESENT',
+            action_label: `Resent invitation email to "${orgUser.email || orgUser.full_name}"`,
+            target_id: String(orgUser.id),
+            target_name: orgUser.full_name || orgUser.email,
+            details: {
+              recipient_email: orgUser.email,
+              organization_name: orgUser.org_name,
+            },
+            user: currentUser,
+          });
+        } catch (_) {}
         showToast(data.message || 'Invitation email resent successfully!', 'success');
       } else {
         showToast('Error: ' + (data.error || 'Failed to resend invitation'), 'error');
@@ -799,14 +972,404 @@ const UserManagement = () => {
     }
   };
 
-  const getRoleLabel = (role) => {
+  const handleInitiateTransfer = async (e) => {
+    e.preventDefault();
+    if (!transferForm.successorName.trim() || !transferForm.successorEmail.trim() || !transferForm.adminPassword) {
+      setTransferError('Please fill in all required fields including your admin password.');
+      return;
+    }
+
+    setIsTransferring(true);
+    setTransferError('');
+
+    try {
+      const res = await apiFetch('/api/admin/transfer-ownership', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          adminEmail: currentUser?.email,
+          adminPassword: transferForm.adminPassword,
+          successorName: transferForm.successorName,
+          successorEmail: transferForm.successorEmail,
+          successorContact: transferForm.successorContact,
+          appOrigin: window.location.origin,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to initiate ownership transfer.');
+      }
+
+      try {
+        logAuditEvent({
+          module: 'USERS',
+          action_type: 'ADMIN_TRANSFER_INITIATED',
+          action_label: `Initiated Administrator ownership transfer to "${transferForm.successorName}" (${transferForm.successorEmail})`,
+          target_id: String(currentUser?.id),
+          target_name: transferForm.successorName,
+          details: {
+            successor_name: transferForm.successorName,
+            successor_email: transferForm.successorEmail,
+            successor_contact: transferForm.successorContact,
+          },
+          user: currentUser,
+        });
+      } catch (_) {}
+
+      showToast(`Ownership transfer invitation sent to ${transferForm.successorEmail}`, 'success');
+      setIsTransferModalOpen(false);
+      setTransferForm({ successorName: '', successorEmail: '', successorContact: '', adminPassword: '' });
+      fetchUsers();
+    } catch (err) {
+      console.error('Transfer ownership error:', err);
+      setTransferError(err.message || 'An error occurred while transferring ownership.');
+      showToast(err.message || 'Error initiating transfer', 'error');
+    } finally {
+      setIsTransferring(false);
+    }
+  };
+
+  const handleDeactivateFormerAdminSubmit = async (e) => {
+    e.preventDefault();
+    if (!deactivateFormerPassword) {
+      setDeactivateFormerError('Your admin password is required.');
+      return;
+    }
+
+    setIsDeactivatingFormer(true);
+    setDeactivateFormerError('');
+
+    try {
+      const res = await apiFetch('/api/admin/deactivate-former-admin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          adminEmail: currentUser?.email,
+          adminPassword: deactivateFormerPassword,
+          formerAdminId: formerAdminToDeactivate?.id || formerAdminToDeactivate?.user_id,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to deactivate former admin account.');
+      }
+
+      showToast('Former administrator account has been deactivated.', 'success');
+      setIsDeactivateFormerModalOpen(false);
+      setFormerAdminToDeactivate(null);
+      setDeactivateFormerPassword('');
+      fetchUsers();
+    } catch (err) {
+      console.error('Deactivate former admin error:', err);
+      setDeactivateFormerError(err.message || 'Error deactivating former administrator.');
+      showToast(err.message || 'Deactivation error', 'error');
+    } finally {
+      setIsDeactivatingFormer(false);
+    }
+  };
+
+  const getRoleLabel = (role, status) => {
+    if (role === 'admin' || role === 'sds-coordinator') {
+      if (status === 'Handed Over (Read-Only)') return 'Former SDS Coordinator (Read-Only)';
+      if (status === 'Pending Handover') return 'Successor SDS Coordinator';
+      return 'SDS Coordinator (Administrator)';
+    }
+    const matched = roles.find((r) => r.slug === role);
+    if (matched?.name) return matched.name;
     if (role === 'org-president') return 'Organization President';
     if (role === 'vice-chairman') return 'Vice Chairman';
-    if (role === 'admin') return 'System Administrator';
     if (role === 'chairman') return 'Chairman';
-    if (role === 'sds-coordinator') return 'SDS Coordinator';
     if (role === 'oso-staff') return 'OSO Staff';
-    return role || 'User';
+    return formatRoleName(role, roles);
+  };
+
+  const handleOpenCreateRole = () => {
+    setRoleFormData({
+      name: '',
+      slug: '',
+      description: '',
+      permissions: ['documents.view', 'academic.view', 'announcements.view', 'requirements.view'],
+    });
+    setIsCreateRoleModalOpen(true);
+  };
+
+  const handleOpenEditRole = (role) => {
+    setSelectedRoleForEdit(role);
+    setRoleFormData({
+      name: role.name,
+      slug: role.slug,
+      description: role.description || '',
+      permissions: Array.isArray(role.permissions) ? [...role.permissions] : [],
+    });
+    setIsEditRoleModalOpen(true);
+  };
+
+  const handleTogglePermission = (permKey) => {
+    setRoleFormData((prev) => {
+      let perms = [...prev.permissions];
+      const isAlreadyChecked = perms.includes(permKey);
+
+      if (isAlreadyChecked) {
+        // UNCHECKING permKey
+        perms = perms.filter((p) => p !== permKey);
+
+        // If unchecking a 'view' permission, automatically remove the corresponding 'manage' / 'evaluate' permission
+        if (permKey === 'announcements.view') {
+          perms = perms.filter((p) => p !== 'announcements.manage');
+        } else if (permKey === 'academic.view') {
+          perms = perms.filter((p) => p !== 'academic.manage');
+        } else if (permKey === 'requirements.view') {
+          perms = perms.filter((p) => p !== 'requirements.manage');
+        } else if (permKey === 'users.view') {
+          perms = perms.filter((p) => p !== 'users.manage');
+        } else if (permKey === 'documents.view') {
+          perms = perms.filter((p) => p !== 'documents.evaluate' && p !== 'documents.approve' && p !== 'documents.return' && p !== 'documents.disapprove');
+        }
+      } else {
+        // CHECKING permKey
+        perms.push(permKey);
+
+        // If checking 'manage', automatically check 'view'!
+        if (permKey === 'announcements.manage' && !perms.includes('announcements.view')) {
+          perms.push('announcements.view');
+        } else if (permKey === 'academic.manage' && !perms.includes('academic.view')) {
+          perms.push('academic.view');
+        } else if (permKey === 'requirements.manage' && !perms.includes('requirements.view')) {
+          perms.push('requirements.view');
+        } else if (permKey === 'users.manage' && !perms.includes('users.view')) {
+          perms.push('users.view');
+        } else if (permKey === 'documents.evaluate' || permKey === 'documents.approve' || permKey === 'documents.return' || permKey === 'documents.disapprove') {
+          if (!perms.includes('documents.view')) {
+            perms.push('documents.view');
+          }
+          perms = perms.filter((p) => p !== 'documents.submit');
+        } else if (permKey === 'documents.submit') {
+          // Mutual exclusivity: Student submitters can only submit proposals and view guidelines/announcements/calendar.
+          // All institutional management, evaluation, and user directory permissions are prohibited!
+          const institutionalOnly = [
+            'documents.view',
+            'documents.evaluate',
+            'documents.approve',
+            'documents.return',
+            'documents.disapprove',
+            'academic.manage',
+            'announcements.manage',
+            'requirements.manage',
+            'users.view',
+            'users.manage'
+          ];
+          perms = perms.filter((p) => !institutionalOnly.includes(p));
+        } else {
+          // If an institutional permission is checked, submit cannot be checked
+          const institutionalOnly = [
+            'documents.view',
+            'documents.evaluate',
+            'documents.approve',
+            'documents.return',
+            'documents.disapprove',
+            'academic.manage',
+            'announcements.manage',
+            'requirements.manage',
+            'users.view',
+            'users.manage'
+          ];
+          if (institutionalOnly.includes(permKey)) {
+            perms = perms.filter((p) => p !== 'documents.submit');
+          }
+        }
+      }
+
+      return { ...prev, permissions: Array.from(new Set(perms)) };
+    });
+  };
+
+  const handleToggleCategoryPermissions = (group) => {
+    const groupKeys = group.permissions.map((p) => p.key);
+    setRoleFormData((prev) => {
+      const allSelected = groupKeys.every((k) => prev.permissions.includes(k));
+      let newPerms;
+      if (allSelected) {
+        newPerms = prev.permissions.filter((k) => !groupKeys.includes(k));
+      } else {
+        const isSubmitActive = prev.permissions.includes('documents.submit');
+        const institutionalOnly = [
+          'documents.view',
+          'documents.evaluate',
+          'academic.manage',
+          'announcements.manage',
+          'requirements.manage',
+          'users.view',
+          'users.manage'
+        ];
+        
+        let toAdd = [...groupKeys];
+        if (isSubmitActive) {
+          toAdd = toAdd.filter((k) => !institutionalOnly.includes(k));
+        } else {
+          toAdd = toAdd.filter((k) => k !== 'documents.submit');
+        }
+        newPerms = Array.from(new Set([...prev.permissions, ...toAdd]));
+      }
+      return { ...prev, permissions: newPerms };
+    });
+  };
+
+  const handleSelectAllPermissions = (selectAll = true) => {
+    setRoleFormData((prev) => ({
+      ...prev,
+      permissions: selectAll
+        ? ALL_PERMISSIONS.filter((p) => p !== 'documents.submit')
+        : [],
+    }));
+  };
+
+  const handleSaveNewRole = async (e) => {
+    e.preventDefault();
+    if (!roleFormData.name.trim()) {
+      showToast('Role title/name is required.', 'error');
+      return;
+    }
+
+    setIsSavingRole(true);
+    try {
+      const res = await apiFetch('/api/roles', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: roleFormData.name.trim(),
+          slug: roleFormData.slug.trim() || undefined,
+          description: roleFormData.description.trim() || null,
+          permissions: roleFormData.permissions,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to create custom role');
+      }
+
+      showToast(`Custom role "${roleFormData.name}" was successfully created!`, 'success');
+      setIsCreateRoleModalOpen(false);
+
+      try {
+        logAuditEvent({
+          module: 'USERS',
+          action_type: 'ROLE_CREATED',
+          action_label: `Created custom role "${roleFormData.name}"`,
+          target_name: roleFormData.name,
+          details: {
+            role_name: roleFormData.name,
+            permissions_granted: roleFormData.permissions,
+          },
+          user,
+        });
+      } catch (_) {}
+      refreshRoles();
+    } catch (err) {
+      console.error('Error creating role:', err);
+      showToast(err.message || 'Error creating custom role', 'error');
+    } finally {
+      setIsSavingRole(false);
+    }
+  };
+
+  const handleUpdateRole = async (e) => {
+    e.preventDefault();
+    if (!selectedRoleForEdit?.id) return;
+    if (!roleFormData.name.trim()) {
+      showToast('Role title/name is required.', 'error');
+      return;
+    }
+
+    setIsSavingRole(true);
+    try {
+      const res = await apiFetch(`/api/roles/${selectedRoleForEdit.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: roleFormData.name.trim(),
+          description: roleFormData.description.trim() || null,
+          permissions: roleFormData.permissions,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to update role permissions');
+      }
+
+      showToast(`Permissions for role "${roleFormData.name}" have been updated!`, 'success');
+      setIsEditRoleModalOpen(false);
+
+      try {
+        logAuditEvent({
+          module: 'USERS',
+          action_type: 'ROLE_PERMISSIONS_UPDATED',
+          action_label: `Updated permissions for role "${roleFormData.name}"`,
+          target_id: String(selectedRoleForEdit.id),
+          target_name: roleFormData.name,
+          details: {
+            role_name: roleFormData.name,
+            permissions_granted: roleFormData.permissions,
+          },
+          user,
+        });
+      } catch (_) {}
+      refreshRoles();
+    } catch (err) {
+      console.error('Error updating role:', err);
+      showToast(err.message || 'Error updating role permissions', 'error');
+    } finally {
+      setIsSavingRole(false);
+    }
+  };
+
+  const handleDeleteRoleClick = (role) => {
+    if (role.is_system) {
+      showToast('Default system roles cannot be deleted.', 'error');
+      return;
+    }
+    setRoleToDelete(role);
+    setIsDeleteRoleModalOpen(true);
+  };
+
+  const handleConfirmDeleteRole = async () => {
+    if (!roleToDelete?.id) return;
+
+    setIsDeletingRole(true);
+    try {
+      const res = await apiFetch(`/api/roles/${roleToDelete.id}`, {
+        method: 'DELETE',
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to delete role');
+      }
+
+      showToast(`Role "${roleToDelete.name}" was successfully removed.`, 'success');
+      setIsDeleteRoleModalOpen(false);
+
+      try {
+        logAuditEvent({
+          module: 'USERS',
+          action_type: 'ROLE_DELETED',
+          action_label: `Deleted custom role "${roleToDelete.name}"`,
+          target_id: String(roleToDelete.id),
+          target_name: roleToDelete.name,
+          details: {
+            role_name: roleToDelete.name,
+          },
+          user,
+        });
+      } catch (_) {}
+      setRoleToDelete(null);
+      refreshRoles();
+    } catch (err) {
+      console.error('Error deleting role:', err);
+      showToast(err.message || 'Error deleting role', 'error');
+    } finally {
+      setIsDeletingRole(false);
+    }
   };
 
   const renderProfileDetail = () => {
@@ -1038,7 +1601,7 @@ const UserManagement = () => {
                           <Ban size={12} /> Suspend Account
                         </button>
                       )}
-                      {profile.role !== 'admin' && !(profile.has_submissions || detailData?.user?.has_submissions || (detailData?.documentLogs && detailData.documentLogs.length > 0)) && (
+                      {((profile.role !== 'admin' && !(profile.has_submissions || detailData?.user?.has_submissions || (detailData?.documentLogs && detailData.documentLogs.length > 0))) || profile.status === 'Pending Setup' || profile.status === 'Pending Handover') && profile.id !== currentUser?.id && !isReadOnlyAdmin && (
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
@@ -1345,6 +1908,15 @@ const UserManagement = () => {
     return matchesSearch;
   });
 
+  const filteredRoles = roles.filter((role) => {
+    const q = roleSearchQuery.toLowerCase().trim();
+    if (!q) return true;
+    const name = (role.name || '').toLowerCase();
+    const slug = (role.slug || '').toLowerCase();
+    const desc = (role.description || '').toLowerCase();
+    return name.includes(q) || slug.includes(q) || desc.includes(q);
+  });
+
   const profile = selectedUser ? (detailData?.user || selectedUser) : null;
   const isOrgPresident = selectedUser ? selectedUser.role === 'org-president' : false;
   const activeSinceYear = selectedUser
@@ -1408,7 +1980,7 @@ const UserManagement = () => {
               iconColor="purple" 
             />
 
-            <div className="flex gap-3">
+            <div className="flex flex-wrap items-center gap-3">
               <button
                 onClick={handleGenerateReport}
                 className="flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 text-gray-700 rounded-xl hover:bg-gray-50 transition-all shadow-sm font-semibold text-sm"
@@ -1416,25 +1988,53 @@ const UserManagement = () => {
                 <FileText size={18} />
                 Generate Report
               </button>
-              {isCurrentActiveSy && (
+
+              {currentUser?.role === 'admin' && !isReadOnlyAdmin && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTransferForm({ successorName: '', successorEmail: '', successorContact: '', adminPassword: '' });
+                    setTransferError('');
+                    setIsTransferModalOpen(true);
+                  }}
+                  className="flex items-center gap-2 px-4 py-2 bg-amber-50 text-amber-800 border border-amber-200 rounded-xl hover:bg-amber-100 transition-all shadow-sm font-semibold text-sm"
+                  title="Initiate transfer of Primary Administrator ownership"
+                >
+                  <ArrowRightLeft size={18} className="text-amber-600" />
+                  Transfer Ownership
+                </button>
+              )}
+
+              {!isReadOnlyAdmin && (activeTab === 'roles' ? currentUser?.role === 'admin' : isCurrentActiveSy) && (
                 <button
                   onClick={() => {
-                    if (activeTab === 'orgs') {
-                      handleOpenModal('org');
+                    if (activeTab === 'roles') {
+                      handleOpenCreateRole();
+                    } else if (activeTab === 'orgs') {
+                      handleAddNewUser('org');
                     } else {
-                      handleOpenModal('admin-staff');
+                      handleAddNewUser('admin-staff');
                     }
                   }}
                   className="flex items-center gap-2 px-4 py-2 bg-primary-green text-white rounded-xl hover:shadow-lg hover:shadow-primary-green/20 transition-all shadow-md font-semibold text-sm"
                 >
-                  <UserPlus size={18} />
-                  {activeTab === 'orgs' ? 'Create Organization' : 'Add OSO Personnel'}
+                  {activeTab === 'roles' ? <Plus size={18} /> : <UserPlus size={18} />}
+                  {activeTab === 'orgs' ? 'Create Organization' : activeTab === 'roles' ? 'Create Custom Role' : 'Add OSOA Personnel'}
                 </button>
               )}
             </div>
           </div>
 
-          {!isCurrentActiveSy && (
+          {isReadOnlyAdmin && (
+            <div className="bg-amber-50 border border-amber-200 text-amber-900 px-4 py-3 rounded-2xl flex items-center gap-3 mb-6 font-medium text-sm shadow-sm animate-in fade-in">
+              <ShieldAlert size={20} className="text-amber-600 shrink-0" />
+              <div>
+                <strong>Notice:</strong> Your account is currently in <strong>Read-Only Mode</strong> following an administrator ownership transfer. Modification actions are disabled.
+              </div>
+            </div>
+          )}
+
+          {!isCurrentActiveSy && activeTab !== 'roles' && (
             <div className="bg-amber-50 border border-amber-200 text-amber-900 px-4 py-3 rounded-2xl flex items-center gap-3 mb-6 font-medium text-sm shadow-sm animate-in fade-in">
               <Clock size={20} className="text-amber-600 shrink-0" />
               <div>
@@ -1463,12 +2063,155 @@ const UserManagement = () => {
                   : 'text-gray-600 hover:text-gray-900 hover:bg-gray-50'
               }`}
             >
-              <Shield size={16} /> OSO Personnel Accounts
+              <Shield size={16} /> OSOA Personnel Accounts
+            </button>
+            <button
+              onClick={() => { setActiveTab('roles'); setRoleSearchQuery(''); }}
+              className={`px-5 py-2.5 rounded-xl font-bold text-xs transition-all flex items-center gap-2 ${
+                activeTab === 'roles'
+                  ? 'bg-primary-green text-white shadow-md'
+                  : 'text-gray-600 hover:text-gray-900 hover:bg-gray-50'
+              }`}
+            >
+              <Key size={16} /> Roles & Permissions
             </button>
           </div>
 
-          {/* Controls Bar & Filter */}
-          {activeTab === 'orgs' ? (
+          {/* Main Module Content: Roles vs Accounts */}
+          {activeTab === 'roles' ? (
+            <div className="space-y-6 animate-in fade-in duration-200">
+              {/* Roles Header Bar */}
+              <div className="bg-white p-5 rounded-3xl shadow-sm border border-gray-100 flex flex-col md:flex-row gap-4 justify-between items-center text-gray-800">
+                <div className="relative w-full md:w-80">
+                  <span className="absolute inset-y-0 left-0 pl-3.5 flex items-center text-gray-400">
+                    <Search size={18} />
+                  </span>
+                  <input
+                    type="text"
+                    placeholder="Search roles or identifier..."
+                    className="w-full pl-10 pr-4 py-2.5 border border-gray-200 rounded-2xl focus:ring-2 focus:ring-primary-green outline-none transition-all text-sm"
+                    value={roleSearchQuery}
+                    onChange={(e) => setRoleSearchQuery(e.target.value)}
+                  />
+                </div>
+                <div className="flex items-center gap-2 text-xs font-semibold text-gray-500 bg-gray-50 px-3.5 py-2 rounded-xl border border-gray-100 shrink-0">
+                  <Key size={14} className="text-primary-green" />
+                  <span>{roles.length} Roles Registered</span>
+                </div>
+              </div>
+
+              {/* Roles Grid */}
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+                {filteredRoles.map((role) => {
+                  const permsCount = Array.isArray(role.permissions) ? role.permissions.length : 0;
+                  const isSystem = Boolean(role.is_system);
+                  const isPrimaryAdmin = role.slug === 'admin';
+
+                  return (
+                    <div
+                      key={role.id || role.slug}
+                      className="bg-white rounded-3xl border border-gray-100 shadow-sm hover:shadow-md transition-all p-6 flex flex-col justify-between group"
+                    >
+                      <div>
+                        {/* Top Badges */}
+                        <div className="flex items-center justify-between gap-2 mb-3">
+                          <span className={`px-2.5 py-1 rounded-full text-[10px] font-black uppercase tracking-wider border flex items-center gap-1 ${
+                            isPrimaryAdmin
+                              ? 'bg-amber-50 text-amber-800 border-amber-200'
+                              : isSystem
+                                ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                                : 'bg-purple-50 text-purple-800 border-purple-200'
+                          }`}>
+                            {isSystem ? <Shield size={11} className="shrink-0" /> : <Sparkles size={11} className="shrink-0" />}
+                            {isSystem ? 'System Default' : 'Custom Role'}
+                          </span>
+
+                          <span className="text-[11px] font-mono text-gray-400 bg-gray-50 px-2.5 py-0.5 rounded-lg border border-gray-100">
+                            @{role.slug}
+                          </span>
+                        </div>
+
+                        {/* Role Title */}
+                        <h3 className="text-base font-black text-gray-900 group-hover:text-primary-green transition-colors">
+                          {role.name}
+                        </h3>
+
+                        {/* Description */}
+                        <p className="text-xs text-gray-500 mt-2 line-clamp-2 leading-relaxed min-h-[36px]">
+                          {role.description || 'No specialized description provided for this role.'}
+                        </p>
+
+                        {/* User Count & Capabilities Count Stats */}
+                        <div className="grid grid-cols-2 gap-2 mt-4 pt-4 border-t border-gray-50">
+                          <div className="bg-gray-50/70 p-2.5 rounded-2xl border border-gray-100 flex items-center gap-2">
+                            <UsersIcon size={14} className="text-primary-green shrink-0" />
+                            <div>
+                              <span className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider">Assigned</span>
+                              <span className="text-xs font-black text-gray-800">{role.user_count || 0} Accounts</span>
+                            </div>
+                          </div>
+
+                          <div className="bg-gray-50/70 p-2.5 rounded-2xl border border-gray-100 flex items-center gap-2">
+                            <CheckCircle size={14} className="text-emerald-600 shrink-0" />
+                            <div>
+                              <span className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider">Capabilities</span>
+                              <span className="text-xs font-black text-gray-800">{permsCount} Granted</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Domain Access Tags */}
+                        <div className="mt-3 flex flex-wrap gap-1.5">
+                          {PERMISSION_GROUPS.map((group) => {
+                            const groupGranted = (role.permissions || []).filter((p) =>
+                              group.permissions.some((gp) => gp.key === p)
+                            ).length;
+                            if (groupGranted === 0) return null;
+                            return (
+                              <span
+                                key={group.category}
+                                className="text-[10px] font-semibold bg-emerald-50/50 text-emerald-800 border border-emerald-100/60 px-2 py-0.5 rounded-md"
+                                title={`${group.category}: ${groupGranted} of ${group.permissions.length} capabilities active`}
+                              >
+                                {group.category.split(' ')[0]} ({groupGranted})
+                              </span>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      {/* Card Actions */}
+                      <div className="mt-5 pt-4 border-t border-gray-100 flex items-center justify-between gap-2">
+                        <button
+                          type="button"
+                          onClick={() => handleOpenEditRole(role)}
+                          disabled={isReadOnlyAdmin}
+                          className="px-3.5 py-2 rounded-xl text-xs font-bold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 transition-all flex items-center gap-1.5 disabled:opacity-40"
+                        >
+                          <Pencil size={13} /> Configure Permissions
+                        </button>
+
+                        {!isSystem && (
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteRoleClick(role)}
+                            disabled={isReadOnlyAdmin}
+                            className="p-2 rounded-xl text-gray-400 hover:text-red-600 hover:bg-red-50 border border-transparent hover:border-red-100 transition-all disabled:opacity-40"
+                            title="Delete Custom Role"
+                          >
+                            <Trash2 size={15} />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ) : (
+            <>
+              {/* Controls Bar & Filter */}
+              {activeTab === 'orgs' ? (
             <div className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 mb-6 flex flex-col md:flex-row gap-4 justify-between items-center text-gray-800">
               <div className="flex flex-col md:flex-row items-center gap-4 w-full md:w-auto">
                 <div className="relative w-full md:w-80">
@@ -1551,7 +2294,7 @@ const UserManagement = () => {
                   >
                     <option value="all">All Personnel Roles</option>
                     <option value="staff">Chairman / Vice Chairman / OSO Staff</option>
-                    <option value="sds">SDS Coordinator & Admin</option>
+                    <option value="sds">SDS Coordinator (Admin)</option>
                   </select>
                 </div>
 
@@ -1673,7 +2416,7 @@ const UserManagement = () => {
                                   >
                                     <Pencil size={14} className="sm:w-4 sm:h-4" />
                                   </button>
-                                  {!org.has_submissions && (
+                                  {(!org.has_submissions || org.status === 'Pending Setup') && !isReadOnlyAdmin && (
                                     <button
                                       onClick={(e) => {
                                         e.stopPropagation();
@@ -1718,7 +2461,7 @@ const UserManagement = () => {
                       filteredPersonnel.map((personnel) => {
                         const isActive = personnel.status === 'Active' || personnel.status === 'Active (Extended)';
                         const isSuspended = personnel.status?.startsWith('Suspended');
-                        const isPendingSetup = personnel.status === 'Pending Setup';
+                        const isPendingSetup = personnel.status === 'Pending Setup' || personnel.status === 'Pending Handover';
                         return (
                           <tr
                             key={personnel.id}
@@ -1744,19 +2487,35 @@ const UserManagement = () => {
                               </div>
                             </td>
                             <td className="hidden sm:table-cell px-6 py-4">
-                              <span className="px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider bg-purple-100 text-purple-800 border border-purple-200">
-                                {getRoleLabel(personnel.role)}
+                              <span className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider border ${
+                                personnel.role === 'admin'
+                                  ? personnel.status === 'Handed Over (Read-Only)'
+                                    ? 'bg-amber-100 text-amber-800 border-amber-200'
+                                    : personnel.status === 'Pending Handover'
+                                      ? 'bg-blue-100 text-blue-800 border-blue-200'
+                                      : 'bg-emerald-100 text-emerald-800 border-emerald-200'
+                                  : 'bg-purple-100 text-purple-800 border-purple-200'
+                              }`}>
+                                {getRoleLabel(personnel.role, personnel.status)}
                               </span>
                             </td>
                             <td className="px-3 sm:px-6 py-4">
                               <div className="flex items-center gap-1.5">
                                 <div
                                   className={`w-2 h-2 rounded-full ${
-                                    isSuspended ? 'bg-red-500' : isPendingSetup ? 'bg-amber-500 animate-pulse' : !isActive ? 'bg-gray-400' : 'bg-emerald-500'
+                                    personnel.status === 'Handed Over (Read-Only)'
+                                      ? 'bg-amber-500'
+                                      : personnel.status === 'Pending Handover'
+                                        ? 'bg-blue-500 animate-pulse'
+                                        : isSuspended ? 'bg-red-500' : isPendingSetup ? 'bg-amber-500 animate-pulse' : !isActive ? 'bg-gray-400' : 'bg-emerald-500'
                                   }`}
                                 ></div>
                                 <span className="text-xs font-semibold text-gray-700">
-                                  {isSuspended ? 'Suspended' : isPendingSetup ? 'Pending Setup' : isActive ? 'Active' : 'Inactive'}
+                                  {personnel.status === 'Handed Over (Read-Only)'
+                                    ? 'Handed Over (Read-Only)'
+                                    : personnel.status === 'Pending Handover'
+                                      ? 'Pending Setup'
+                                      : isSuspended ? 'Suspended' : isPendingSetup ? 'Pending Setup' : isActive ? 'Active' : 'Inactive'}
                                 </span>
                               </div>
                             </td>
@@ -1765,7 +2524,7 @@ const UserManagement = () => {
                             </td>
                             <td className="px-3 sm:px-6 py-4 text-right" onClick={(e) => e.stopPropagation()}>
                               <div className="flex justify-end items-center gap-1.5 sm:gap-2">
-                                {personnel.status === 'Pending Setup' && (
+                                {(personnel.status === 'Pending Setup' || personnel.status === 'Pending Handover') && !isReadOnlyAdmin && (
                                   <button
                                     type="button"
                                     onClick={(e) => {
@@ -1778,7 +2537,23 @@ const UserManagement = () => {
                                     <Mail size={14} className="sm:w-4 sm:h-4" />
                                   </button>
                                 )}
-                                {personnel.role !== 'admin' && (
+                                {personnel.role === 'admin' && personnel.status === 'Handed Over (Read-Only)' && currentUser?.role === 'admin' && !isReadOnlyAdmin && (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setFormerAdminToDeactivate(personnel);
+                                      setDeactivateFormerPassword('');
+                                      setDeactivateFormerError('');
+                                      setIsDeactivateFormerModalOpen(true);
+                                    }}
+                                    className="p-1.5 sm:p-2 text-amber-700 hover:text-red-700 transition-colors bg-amber-50 hover:bg-red-50 border border-amber-200 hover:border-red-200 rounded-lg"
+                                    title="Deactivate Former Administrator Account"
+                                  >
+                                    <UserX size={14} className="sm:w-4 sm:h-4" />
+                                  </button>
+                                )}
+                                {personnel.role !== 'admin' && !isPendingSetup && !isReadOnlyAdmin && (
                                   <button
                                     type="button"
                                     onClick={() => handleTogglePersonnelStatus(personnel)}
@@ -1792,13 +2567,16 @@ const UserManagement = () => {
                                     {isActive ? <Ban size={14} /> : <UserCheck size={14} />}
                                   </button>
                                 )}
-                                <button
-                                  onClick={() => handleEditClick(personnel)}
-                                  className="p-1.5 sm:p-2 text-gray-400 hover:text-blue-600 transition-colors bg-gray-50 rounded-lg hover:bg-blue-50"
-                                >
-                                  <Pencil size={14} className="sm:w-4 sm:h-4" />
-                                </button>
-                                {personnel.role !== 'admin' && !personnel.has_submissions && (
+                                {!isReadOnlyAdmin && (
+                                  <button
+                                    onClick={() => handleEditClick(personnel)}
+                                    className="p-1.5 sm:p-2 text-gray-400 hover:text-blue-600 transition-colors bg-gray-50 rounded-lg hover:bg-blue-50"
+                                    title="Edit Details"
+                                  >
+                                    <Pencil size={14} className="sm:w-4 sm:h-4" />
+                                  </button>
+                                )}
+                                {((personnel.role !== 'admin' && !personnel.has_submissions) || isPendingSetup) && personnel.id !== currentUser?.id && !isReadOnlyAdmin && (
                                   <button
                                     onClick={(e) => {
                                       e.stopPropagation();
@@ -1818,7 +2596,7 @@ const UserManagement = () => {
                     ) : (
                       <tr>
                         <td colSpan="5" className="px-6 py-20 text-center text-gray-400">
-                          No OSO personnel accounts found.
+                          No OSOA personnel accounts found.
                         </td>
                       </tr>
                     )}
@@ -1829,6 +2607,8 @@ const UserManagement = () => {
           </div>
         </>
       )}
+    </>
+  )}
 
       {/* Modal - Create User */}
       {isModalOpen && (
@@ -2191,19 +2971,29 @@ const UserManagement = () => {
                     </div>
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Role</label>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Account Role *</label>
                     <div className="relative">
                       <select
-                        className="w-full px-4 py-2.5 border border-gray-200 rounded-xl outline-none focus:ring-2 focus:ring-primary-green bg-white appearance-none"
+                        className="w-full px-4 py-2.5 border border-gray-200 rounded-xl outline-none focus:ring-2 focus:ring-primary-green bg-white text-gray-800"
                         value={formData.role}
                         onChange={(e) => setFormData({ ...formData, role: e.target.value })}
+                        required
                       >
-                        <option value="chairman">Chairman</option>
-                        <option value="vice-chairman">Vice Chairman</option>
+                        {roles.length > 0 ? (
+                          roles
+                            .filter((r) => r.slug !== 'org-president' && r.slug !== 'admin')
+                            .map((r) => (
+                              <option key={r.id || r.slug} value={r.slug}>
+                                {r.name} {r.is_system ? '(System)' : '(Custom)'}
+                              </option>
+                            ))
+                        ) : (
+                          <>
+                            <option value="chairman">OSO Chairman</option>
+                            <option value="vice-chairman">OSO Vice-Chairman</option>
+                          </>
+                        )}
                       </select>
-                      <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-gray-400">
-                        <MoreVertical size={16} />
-                      </div>
                     </div>
                   </div>
                   <div>
@@ -2495,7 +3285,7 @@ const UserManagement = () => {
               </div>
               <h2 className="text-2xl font-bold text-gray-800 mb-2">Confirm Deletion</h2>
               <p className="text-gray-500 mb-8">
-                You are about to delete <span className="font-bold text-gray-800">{userToDelete?.full_name}</span>. This action cannot be undone.
+                You are about to delete <span className="font-bold text-gray-800">{userToDelete?.org_name || userToDelete?.full_name || 'this account'}</span>. This action cannot be undone.
               </p>
 
               <form onSubmit={confirmDelete} className="space-y-4">
@@ -2822,6 +3612,746 @@ const UserManagement = () => {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal - Transfer Administrator Ownership */}
+      {isTransferModalOpen && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm transition-opacity" onClick={() => !isTransferring && setIsTransferModalOpen(false)}></div>
+          <div className="bg-white w-full max-w-lg rounded-3xl shadow-2xl relative z-10 overflow-hidden animate-in zoom-in-95 duration-200">
+            {/* Header */}
+            <div className="bg-gradient-to-r from-amber-600 to-amber-700 p-6 text-white flex justify-between items-center">
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 bg-white/20 rounded-xl shrink-0">
+                  <ArrowRightLeft size={22} className="text-white" />
+                </div>
+                <div>
+                  <h2 className="text-lg font-bold">Transfer SDS Coordinator Ownership</h2>
+                  <p className="text-white/80 text-xs">Assign a successor to assume SDS Coordinator / Administrator authority.</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => !isTransferring && setIsTransferModalOpen(false)}
+                className="p-1.5 hover:bg-white/10 rounded-full transition-colors text-white"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            {/* Form */}
+            <form onSubmit={handleInitiateTransfer} className="p-6 space-y-4">
+              {transferError && (
+                <div className="p-3 bg-red-50 border border-red-200 text-red-700 rounded-xl text-xs flex items-center gap-2">
+                  <AlertTriangle size={16} className="shrink-0 text-red-600" />
+                  <span>{transferError}</span>
+                </div>
+              )}
+
+              <div className="p-3.5 bg-amber-50 rounded-2xl border border-amber-200/80 text-xs text-amber-900 space-y-1.5">
+                <div className="font-bold flex items-center gap-1.5 text-amber-950">
+                  <ShieldCheck size={16} className="text-amber-700 shrink-0" />
+                  Handover & Transition Policy
+                </div>
+                <ul className="list-disc list-inside space-y-1 text-amber-800/90 pl-1 leading-relaxed">
+                  <li>An official setup link will be emailed to the successor.</li>
+                  <li>When the successor completes setup, they become the active <strong>SDS Coordinator (Administrator)</strong>.</li>
+                  <li>Your account will automatically transition to <strong>Read-Only Mode</strong> to maintain historical continuity.</li>
+                </ul>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-gray-700 mb-1">
+                  Successor Full Name <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. Juan Dela Cruz"
+                  value={transferForm.successorName}
+                  onChange={(e) => setTransferForm({ ...transferForm, successorName: e.target.value })}
+                  className="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-amber-600 bg-white"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-gray-700 mb-1">
+                  Successor Official Email <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="email"
+                  required
+                  placeholder="e.g. newadmin@bulsu.edu.ph"
+                  value={transferForm.successorEmail}
+                  onChange={(e) => setTransferForm({ ...transferForm, successorEmail: e.target.value })}
+                  className="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-amber-600 bg-white"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-gray-700 mb-1">
+                  Successor Contact Number
+                </label>
+                <input
+                  type="text"
+                  placeholder="e.g. 09123456789"
+                  value={transferForm.successorContact}
+                  onChange={(e) => setTransferForm({ ...transferForm, successorContact: e.target.value })}
+                  className="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-amber-600 bg-white"
+                />
+              </div>
+
+              <div className="pt-2 border-t border-gray-100">
+                <label className="block text-xs font-bold text-gray-700 mb-1">
+                  Confirm Current Administrator Password <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="password"
+                  required
+                  placeholder="Enter your current password to authorize"
+                  value={transferForm.adminPassword}
+                  onChange={(e) => setTransferForm({ ...transferForm, adminPassword: e.target.value })}
+                  className="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-amber-600 bg-white"
+                />
+              </div>
+
+              <div className="flex justify-end gap-3 pt-3">
+                <button
+                  type="button"
+                  disabled={isTransferring}
+                  onClick={() => setIsTransferModalOpen(false)}
+                  className="px-4 py-2.5 rounded-xl border border-gray-200 text-gray-600 font-semibold text-sm hover:bg-gray-50 transition-colors disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isTransferring}
+                  className="px-5 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-semibold text-sm transition-all shadow-md hover:shadow-lg flex items-center gap-2 disabled:opacity-50"
+                >
+                  {isTransferring ? (
+                    <>
+                      <Loader2 size={16} className="animate-spin" />
+                      Sending Invitation...
+                    </>
+                  ) : (
+                    <>
+                      <ArrowRightLeft size={16} />
+                      Send Transfer Invitation
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal - Deactivate Former Administrator */}
+      {isDeactivateFormerModalOpen && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm transition-opacity" onClick={() => !isDeactivatingFormer && setIsDeactivateFormerModalOpen(false)}></div>
+          <div className="bg-white w-full max-w-md rounded-3xl shadow-2xl relative z-10 overflow-hidden animate-in zoom-in-95 duration-200">
+            <div className="bg-red-600 p-6 text-white flex justify-between items-center">
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 bg-white/20 rounded-xl shrink-0">
+                  <UserX size={22} className="text-white" />
+                </div>
+                <div>
+                  <h2 className="text-lg font-bold">Deactivate Former Admin</h2>
+                  <p className="text-white/80 text-xs">Conclude transition period and revoke login access.</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => !isDeactivatingFormer && setIsDeactivateFormerModalOpen(false)}
+                className="p-1.5 hover:bg-white/10 rounded-full transition-colors text-white"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            <form onSubmit={handleDeactivateFormerAdminSubmit} className="p-6 space-y-4">
+              {deactivateFormerError && (
+                <div className="p-3 bg-red-50 border border-red-200 text-red-700 rounded-xl text-xs flex items-center gap-2">
+                  <AlertTriangle size={16} className="shrink-0 text-red-600" />
+                  <span>{deactivateFormerError}</span>
+                </div>
+              )}
+
+              <p className="text-sm text-gray-700 leading-relaxed">
+                Are you sure you want to permanently deactivate the account for{' '}
+                <strong>{formerAdminToDeactivate?.full_name || 'Former Admin'}</strong> (
+                <span className="font-mono text-xs">{formerAdminToDeactivate?.email}</span>)?
+              </p>
+
+              <div className="p-3 bg-gray-50 border border-gray-200 rounded-xl text-xs text-gray-600 leading-relaxed">
+                <strong>Note:</strong> Their login sessions will be immediately terminated. Historical records, announcements, and past approval logs attributed to this user remain preserved.
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-gray-700 mb-1">
+                  Enter Your Administrator Password <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="password"
+                  required
+                  placeholder="Your admin password"
+                  value={deactivateFormerPassword}
+                  onChange={(e) => setDeactivateFormerPassword(e.target.value)}
+                  className="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-red-600 bg-white"
+                />
+              </div>
+
+              <div className="flex justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  disabled={isDeactivatingFormer}
+                  onClick={() => setIsDeactivateFormerModalOpen(false)}
+                  className="px-4 py-2.5 rounded-xl border border-gray-200 text-gray-600 font-semibold text-sm hover:bg-gray-50 transition-colors disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isDeactivatingFormer}
+                  className="px-5 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white font-semibold text-sm transition-all shadow-md hover:shadow-lg flex items-center gap-2 disabled:opacity-50"
+                >
+                  {isDeactivatingFormer ? (
+                    <>
+                      <Loader2 size={16} className="animate-spin" />
+                      Deactivating...
+                    </>
+                  ) : (
+                    <>
+                      <UserX size={16} />
+                      Confirm Deactivation
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal - Create Custom Role */}
+      {isCreateRoleModalOpen && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4 animate-in fade-in duration-200">
+          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm transition-opacity" onClick={() => setIsCreateRoleModalOpen(false)}></div>
+
+          <div className="bg-white w-full max-w-3xl rounded-3xl shadow-2xl relative z-10 overflow-hidden animate-in zoom-in-95 duration-200 flex flex-col max-h-[90vh]">
+            {/* Header */}
+            <div className="bg-primary-green p-6 text-white flex justify-between items-center">
+              <div>
+                <h2 className="text-xl font-bold flex items-center gap-2">
+                  <Key size={22} className="text-secondary-gold shrink-0" />
+                  Create New Institutional Role
+                </h2>
+                <p className="text-white/70 text-xs">Define a custom organizational role and configure granular permission access.</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsCreateRoleModalOpen(false)}
+                className="p-2 hover:bg-white/10 rounded-full transition-colors"
+              >
+                <X size={24} />
+              </button>
+            </div>
+
+            {/* Form */}
+            <form onSubmit={handleSaveNewRole} id="create-role-form" className="p-8 overflow-y-auto space-y-6 text-gray-800 flex-1">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-1">Role Title / Display Name *</label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="e.g. Assistant Evaluator"
+                    className="w-full px-4 py-2.5 border border-gray-200 rounded-xl outline-none focus:ring-2 focus:ring-primary-green text-sm"
+                    value={roleFormData.name}
+                    onChange={(e) => {
+                      const name = e.target.value;
+                      const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+                      setRoleFormData((prev) => ({ ...prev, name, slug }));
+                    }}
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-1">Role Identifier (Slug)</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. assistant-evaluator"
+                    className="w-full px-4 py-2.5 border border-gray-200 rounded-xl outline-none focus:ring-2 focus:ring-primary-green font-mono text-sm bg-gray-50 text-gray-600"
+                    value={roleFormData.slug}
+                    onChange={(e) => setRoleFormData({ ...roleFormData, slug: e.target.value })}
+                  />
+                  <span className="text-[10px] text-gray-400 mt-0.5 block">Unique system key for account assignments.</span>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-1">Role Description</label>
+                <textarea
+                  rows={2}
+                  placeholder="Describe institutional duties, review capabilities, or responsibilities..."
+                  className="w-full px-4 py-2 border border-gray-200 rounded-xl outline-none focus:ring-2 focus:ring-primary-green text-sm"
+                  value={roleFormData.description}
+                  onChange={(e) => setRoleFormData({ ...roleFormData, description: e.target.value })}
+                />
+              </div>
+
+              {/* Permission Checklist */}
+              <div className="space-y-4 pt-4 border-t border-gray-100">
+                <div className="flex items-center justify-between pb-2 border-b border-gray-100">
+                  <span className="text-xs font-black uppercase tracking-wider text-gray-500">
+                    Capabilities & Permissions ({roleFormData.permissions.length} Selected)
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleSelectAllPermissions(true)}
+                      className="text-xs font-bold text-primary-green hover:underline"
+                    >
+                      Select All
+                    </button>
+                    <span className="text-gray-300">|</span>
+                    <button
+                      type="button"
+                      onClick={() => handleSelectAllPermissions(false)}
+                      className="text-xs font-bold text-gray-400 hover:underline"
+                    >
+                      Clear All
+                    </button>
+                  </div>
+                </div>
+
+                {PERMISSION_GROUPS.map((group) => {
+                  const groupKeys = group.permissions.map((p) => p.key);
+                  const allSelected = groupKeys.every((k) => roleFormData.permissions.includes(k));
+
+                  return (
+                    <div key={group.category} className="bg-gray-50/70 p-4 rounded-2xl border border-gray-100">
+                      <div className="flex items-center justify-between mb-2">
+                        <div>
+                          <h4 className="text-xs font-black text-gray-800 uppercase tracking-wider">{group.category}</h4>
+                          <p className="text-[11px] text-gray-500">{group.description}</p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleToggleCategoryPermissions(group)}
+                          className="text-[10px] font-bold px-2.5 py-1 rounded-lg bg-white border border-gray-200 text-gray-700 hover:bg-gray-100 transition-colors"
+                        >
+                          {allSelected ? 'Deselect All' : 'Select All'}
+                        </button>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mt-3">
+                        {group.permissions.map((perm) => {
+                          const isChecked = roleFormData.permissions.includes(perm.key);
+                          const isSubmitChecked = roleFormData.permissions.includes('documents.submit');
+                          const INSTITUTIONAL_ONLY_PERMS = [
+                            'documents.view',
+                            'documents.evaluate',
+                            'academic.manage',
+                            'announcements.manage',
+                            'requirements.manage',
+                            'users.view',
+                            'users.manage'
+                          ];
+
+                          const hasInstitutionalChecked = INSTITUTIONAL_ONLY_PERMS.some(
+                            (k) => roleFormData.permissions.includes(k) || (k === 'documents.evaluate' && roleFormData.permissions.includes('documents.approve'))
+                          );
+
+                          let isMutuallyExclusiveDisabled = false;
+                          let disabledReason = '';
+
+                          if (!isChecked) {
+                            if (perm.key === 'documents.submit' && hasInstitutionalChecked) {
+                              isMutuallyExclusiveDisabled = true;
+                              disabledReason = 'Disabled: Institutional roles cannot submit';
+                            } else if (isSubmitChecked && INSTITUTIONAL_ONLY_PERMS.includes(perm.key)) {
+                              isMutuallyExclusiveDisabled = true;
+                              if (perm.key === 'documents.view') {
+                                disabledReason = 'Disabled: Submitters cannot view institutional submissions';
+                              } else if (perm.key === 'documents.evaluate') {
+                                disabledReason = 'Disabled: Submitters cannot evaluate';
+                              } else if (perm.key === 'academic.manage') {
+                                disabledReason = 'Disabled: Submitters cannot manage calendar';
+                              } else if (perm.key === 'announcements.manage') {
+                                disabledReason = 'Disabled: Submitters cannot manage announcements';
+                              } else if (perm.key === 'requirements.manage') {
+                                disabledReason = 'Disabled: Submitters cannot configure requirements';
+                              } else if (perm.key === 'users.view') {
+                                disabledReason = 'Disabled: Submitters cannot view directory';
+                              } else if (perm.key === 'users.manage') {
+                                disabledReason = 'Disabled: Submitters cannot manage accounts';
+                              } else {
+                                disabledReason = 'Disabled: Not available for submitters';
+                              }
+                            }
+                          }
+
+                          return (
+                            <label
+                              key={perm.key}
+                              className={`flex items-start gap-2.5 p-2.5 rounded-xl border transition-all ${
+                                isMutuallyExclusiveDisabled
+                                  ? 'opacity-60 cursor-not-allowed bg-gray-50 border-gray-200'
+                                  : isChecked
+                                    ? 'bg-emerald-50/70 border-emerald-300 text-emerald-950 shadow-2xs cursor-pointer'
+                                    : 'bg-white border-gray-100 text-gray-600 hover:border-gray-200 cursor-pointer'
+                              }`}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={isChecked}
+                                disabled={isMutuallyExclusiveDisabled}
+                                onChange={() => handleTogglePermission(perm.key)}
+                                className="mt-0.5 w-4 h-4 text-primary-green rounded border-gray-300 focus:ring-primary-green shrink-0 disabled:opacity-40"
+                              />
+                              <div className="min-w-0">
+                                <div className="text-xs font-bold flex items-center gap-1.5 flex-wrap">
+                                  <span>{perm.label}</span>
+                                  {disabledReason && (
+                                    <span className="text-[9px] font-bold bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded">
+                                      {disabledReason}
+                                    </span>
+                                  )}
+                                </div>
+                                <p className="text-[10px] text-gray-500 leading-tight mt-0.5">{perm.description}</p>
+                              </div>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </form>
+
+            {/* Footer */}
+            <div className="p-5 border-t border-gray-100 bg-gray-50/50 flex items-center justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setIsCreateRoleModalOpen(false)}
+                className="px-5 py-2.5 text-gray-500 font-semibold hover:text-gray-700 text-xs transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                form="create-role-form"
+                type="submit"
+                disabled={isSavingRole}
+                className="px-6 py-2.5 bg-primary-green text-white font-bold rounded-xl shadow-md hover:bg-emerald-800 transition-all flex items-center gap-2 text-xs disabled:opacity-50"
+              >
+                {isSavingRole ? (
+                  <>
+                    <Loader2 size={16} className="animate-spin" />
+                    Creating Role...
+                  </>
+                ) : (
+                  <>
+                    <Check size={16} />
+                    Create Role
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal - Edit Role Permissions */}
+      {isEditRoleModalOpen && selectedRoleForEdit && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4 animate-in fade-in duration-200">
+          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm transition-opacity" onClick={() => setIsEditRoleModalOpen(false)}></div>
+
+          <div className="bg-white w-full max-w-3xl rounded-3xl shadow-2xl relative z-10 overflow-hidden animate-in zoom-in-95 duration-200 flex flex-col max-h-[90vh]">
+            {/* Header */}
+            <div className="bg-primary-green p-6 text-white flex justify-between items-center">
+              <div>
+                <h2 className="text-xl font-bold flex items-center gap-2">
+                  <Sliders size={22} className="text-secondary-gold shrink-0" />
+                  Configure Permissions: {selectedRoleForEdit.name}
+                </h2>
+                <p className="text-white/70 text-xs">
+                  {selectedRoleForEdit.is_system ? 'System Default Role • Modify active capabilities and authority.' : 'Custom Role • Update name, description, and permissions.'}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsEditRoleModalOpen(false)}
+                className="p-2 hover:bg-white/10 rounded-full transition-colors"
+              >
+                <X size={24} />
+              </button>
+            </div>
+
+            {/* Form */}
+            <form onSubmit={handleUpdateRole} id="edit-role-form" className="p-8 overflow-y-auto space-y-6 text-gray-800 flex-1">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-1">Role Title / Display Name *</label>
+                  <input
+                    type="text"
+                    required
+                    className="w-full px-4 py-2.5 border border-gray-200 rounded-xl outline-none focus:ring-2 focus:ring-primary-green text-sm"
+                    value={roleFormData.name}
+                    onChange={(e) => setRoleFormData({ ...roleFormData, name: e.target.value })}
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-1">Role Identifier (Slug)</label>
+                  <input
+                    type="text"
+                    disabled
+                    className="w-full px-4 py-2.5 border border-gray-200 rounded-xl outline-none font-mono text-sm bg-gray-100 text-gray-500 cursor-not-allowed"
+                    value={roleFormData.slug}
+                  />
+                  <span className="text-[10px] text-gray-400 mt-0.5 block">Role identifiers are fixed to preserve database references.</span>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-1">Role Description</label>
+                <textarea
+                  rows={2}
+                  placeholder="Describe institutional duties, review capabilities, or responsibilities..."
+                  className="w-full px-4 py-2 border border-gray-200 rounded-xl outline-none focus:ring-2 focus:ring-primary-green text-sm"
+                  value={roleFormData.description}
+                  onChange={(e) => setRoleFormData({ ...roleFormData, description: e.target.value })}
+                />
+              </div>
+
+              {/* Permission Checklist */}
+              <div className="space-y-4 pt-4 border-t border-gray-100">
+                <div className="flex items-center justify-between pb-2 border-b border-gray-100">
+                  <span className="text-xs font-black uppercase tracking-wider text-gray-500">
+                    Capabilities & Permissions ({roleFormData.permissions.length} Active)
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleSelectAllPermissions(true)}
+                      className="text-xs font-bold text-primary-green hover:underline"
+                    >
+                      Select All
+                    </button>
+                    <span className="text-gray-300">|</span>
+                    <button
+                      type="button"
+                      onClick={() => handleSelectAllPermissions(false)}
+                      className="text-xs font-bold text-gray-400 hover:underline"
+                    >
+                      Clear All
+                    </button>
+                  </div>
+                </div>
+
+                {PERMISSION_GROUPS.map((group) => {
+                  const groupKeys = group.permissions.map((p) => p.key);
+                  const allSelected = groupKeys.every((k) => roleFormData.permissions.includes(k));
+
+                  return (
+                    <div key={group.category} className="bg-gray-50/70 p-4 rounded-2xl border border-gray-100">
+                      <div className="flex items-center justify-between mb-2">
+                        <div>
+                          <h4 className="text-xs font-black text-gray-800 uppercase tracking-wider">{group.category}</h4>
+                          <p className="text-[11px] text-gray-500">{group.description}</p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleToggleCategoryPermissions(group)}
+                          className="text-[10px] font-bold px-2.5 py-1 rounded-lg bg-white border border-gray-200 text-gray-700 hover:bg-gray-100 transition-colors"
+                        >
+                          {allSelected ? 'Deselect All' : 'Select All'}
+                        </button>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mt-3">
+                        {group.permissions.map((perm) => {
+                          const isChecked = roleFormData.permissions.includes(perm.key);
+                          const isProtectedAdminPerm = selectedRoleForEdit?.slug === 'admin' && perm.key === 'users.manage';
+                          const isSubmitChecked = roleFormData.permissions.includes('documents.submit');
+                          const INSTITUTIONAL_ONLY_PERMS = [
+                            'documents.view',
+                            'documents.evaluate',
+                            'academic.manage',
+                            'announcements.manage',
+                            'requirements.manage',
+                            'users.view',
+                            'users.manage'
+                          ];
+
+                          const hasInstitutionalChecked = INSTITUTIONAL_ONLY_PERMS.some(
+                            (k) => roleFormData.permissions.includes(k) || (k === 'documents.evaluate' && roleFormData.permissions.includes('documents.approve'))
+                          );
+
+                          let isMutuallyExclusiveDisabled = false;
+                          let disabledReason = '';
+
+                          if (!isChecked) {
+                            if (perm.key === 'documents.submit' && hasInstitutionalChecked) {
+                              isMutuallyExclusiveDisabled = true;
+                              disabledReason = 'Disabled: Institutional roles cannot submit';
+                            } else if (isSubmitChecked && INSTITUTIONAL_ONLY_PERMS.includes(perm.key)) {
+                              isMutuallyExclusiveDisabled = true;
+                              if (perm.key === 'documents.view') {
+                                disabledReason = 'Disabled: Submitters cannot view institutional submissions';
+                              } else if (perm.key === 'documents.evaluate') {
+                                disabledReason = 'Disabled: Submitters cannot evaluate';
+                              } else if (perm.key === 'academic.manage') {
+                                disabledReason = 'Disabled: Submitters cannot manage calendar';
+                              } else if (perm.key === 'announcements.manage') {
+                                disabledReason = 'Disabled: Submitters cannot manage announcements';
+                              } else if (perm.key === 'requirements.manage') {
+                                disabledReason = 'Disabled: Submitters cannot configure requirements';
+                              } else if (perm.key === 'users.view') {
+                                disabledReason = 'Disabled: Submitters cannot view directory';
+                              } else if (perm.key === 'users.manage') {
+                                disabledReason = 'Disabled: Submitters cannot manage accounts';
+                              } else {
+                                disabledReason = 'Disabled: Not available for submitters';
+                              }
+                            }
+                          }
+
+                          const isDisabled = isProtectedAdminPerm || isMutuallyExclusiveDisabled;
+
+                          return (
+                            <label
+                              key={perm.key}
+                              className={`flex items-start gap-2.5 p-2.5 rounded-xl border transition-all ${
+                                isDisabled ? 'opacity-65 cursor-not-allowed bg-gray-50 border-gray-200' : 'cursor-pointer'
+                              } ${
+                                isChecked && !isDisabled
+                                  ? 'bg-emerald-50/70 border-emerald-300 text-emerald-950 shadow-2xs'
+                                  : !isDisabled ? 'bg-white border-gray-100 text-gray-600 hover:border-gray-200' : ''
+                              }`}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={isChecked}
+                                disabled={isDisabled}
+                                onChange={() => handleTogglePermission(perm.key)}
+                                className="mt-0.5 w-4 h-4 text-primary-green rounded border-gray-300 focus:ring-primary-green shrink-0 disabled:opacity-40"
+                              />
+                              <div className="min-w-0">
+                                <div className="text-xs font-bold flex items-center gap-1.5 flex-wrap">
+                                  <span>{perm.label}</span>
+                                  {isProtectedAdminPerm && (
+                                    <span className="text-[9px] font-bold bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded">Core Admin</span>
+                                  )}
+                                  {disabledReason && (
+                                    <span className="text-[9px] font-bold bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded">
+                                      {disabledReason}
+                                    </span>
+                                  )}
+                                </div>
+                                <p className="text-[10px] text-gray-500 leading-tight mt-0.5">{perm.description}</p>
+                              </div>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </form>
+
+            {/* Footer */}
+            <div className="p-5 border-t border-gray-100 bg-gray-50/50 flex items-center justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setIsEditRoleModalOpen(false)}
+                className="px-5 py-2.5 text-gray-500 font-semibold hover:text-gray-700 text-xs transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                form="edit-role-form"
+                type="submit"
+                disabled={isSavingRole}
+                className="px-6 py-2.5 bg-primary-green text-white font-bold rounded-xl shadow-md hover:bg-emerald-800 transition-all flex items-center gap-2 text-xs disabled:opacity-50"
+              >
+                {isSavingRole ? (
+                  <>
+                    <Loader2 size={16} className="animate-spin" />
+                    Saving Changes...
+                  </>
+                ) : (
+                  <>
+                    <Check size={16} />
+                    Save Permissions
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal - Delete Custom Role Confirmation */}
+      {isDeleteRoleModalOpen && roleToDelete && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4 animate-in fade-in duration-200">
+          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm transition-opacity" onClick={() => setIsDeleteRoleModalOpen(false)}></div>
+
+          <div className="bg-white w-full max-w-md rounded-3xl shadow-2xl relative z-10 overflow-hidden animate-in zoom-in-95 duration-200">
+            <div className="p-6 text-center">
+              <div className="w-14 h-14 bg-red-100 text-red-600 rounded-full flex items-center justify-center mx-auto mb-4">
+                <Trash2 size={26} />
+              </div>
+              <h3 className="text-lg font-bold text-gray-900 mb-1">Delete Custom Role</h3>
+              <p className="text-xs text-gray-500 mb-4">
+                Are you sure you want to permanently delete the custom role <span className="font-bold text-gray-800">"{roleToDelete.name}"</span> (@{roleToDelete.slug})?
+              </p>
+
+              {roleToDelete.user_count > 0 && (
+                <div className="bg-amber-50 border border-amber-200 rounded-2xl p-3.5 mb-4 text-left flex items-start gap-2.5">
+                  <AlertTriangle className="text-amber-600 shrink-0 mt-0.5" size={18} />
+                  <div className="text-xs text-amber-900 leading-snug">
+                    <span className="font-bold block mb-0.5">Role In Use</span>
+                    This role is currently assigned to <strong className="text-amber-950">{roleToDelete.user_count} user account(s)</strong>. You must reassign those accounts before this role can be removed.
+                  </div>
+                </div>
+              )}
+
+              <div className="flex gap-3 justify-center pt-2">
+                <button
+                  type="button"
+                  onClick={() => setIsDeleteRoleModalOpen(false)}
+                  className="px-5 py-2.5 rounded-xl border border-gray-200 text-gray-700 font-bold text-xs hover:bg-gray-50 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={isDeletingRole || roleToDelete.user_count > 0}
+                  onClick={handleConfirmDeleteRole}
+                  className="px-6 py-2.5 bg-red-600 text-white font-bold rounded-xl text-xs hover:bg-red-700 transition-all flex items-center gap-2 disabled:opacity-40"
+                >
+                  {isDeletingRole ? (
+                    <>
+                      <Loader2 size={15} className="animate-spin" />
+                      Deleting...
+                    </>
+                  ) : (
+                    <>
+                      <Trash2 size={15} />
+                      Confirm Delete
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

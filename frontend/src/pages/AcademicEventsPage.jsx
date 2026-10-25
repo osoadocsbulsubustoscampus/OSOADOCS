@@ -9,8 +9,8 @@ import { EventModal } from '../components/academic/EventModal';
 import { fetchApprovedActivitySchedules } from '../utils/activityScheduleFetcher';
 
 const AcademicEventsPage = () => {
-  const { user } = useAuth();
-  const canEdit = user?.role === 'admin';
+  const { user, isReadOnlyAdmin, hasPermission } = useAuth();
+  const canEdit = !isReadOnlyAdmin && (user?.role === 'admin' || hasPermission('academic.manage'));
 
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState(null);
@@ -123,6 +123,10 @@ const AcademicEventsPage = () => {
 
   const saveEvent = async (e) => {
     if (e && e.preventDefault) e.preventDefault();
+    if (isReadOnlyAdmin) {
+      showMessage('Action disabled: Handed-over administrator account is in Read-Only mode.', 'error');
+      return;
+    }
     try {
       if (!schoolYears || schoolYears.length === 0) {
         showMessage('Cannot create calendar events because no School Year is configured.', 'error');
@@ -172,6 +176,10 @@ const AcademicEventsPage = () => {
   };
 
   const toggleEventBlock = async (ev) => {
+    if (isReadOnlyAdmin) {
+      showMessage('Action disabled: Handed-over administrator account is in Read-Only mode.', 'error');
+      return;
+    }
     try {
       const isCurrentlyBlocked =
         ev.event_type === 'blocked_activity' || ev.blocks_activity || ev.description === 'BLOCKS_ACTIVITY';
@@ -197,6 +205,10 @@ const AcademicEventsPage = () => {
   };
 
   const deleteEvent = async (id) => {
+    if (isReadOnlyAdmin) {
+      showMessage('Action disabled: Handed-over administrator account is in Read-Only mode.', 'error');
+      return;
+    }
     if (!window.confirm('Are you sure you want to delete this calendar event?')) return;
     try {
       const res = await apiFetch(`/api/academic-events/${id}`, { method: 'DELETE' });

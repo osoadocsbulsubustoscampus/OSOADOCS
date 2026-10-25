@@ -12,8 +12,8 @@ import { ArchiveConfirmModal } from '../components/academic/ArchiveConfirmModal'
 import { CloseConfirmModal } from '../components/academic/CloseConfirmModal';
 
 const SchoolYearPage = () => {
-  const { user } = useAuth();
-  const canEdit = user?.role === 'admin';
+  const { user, isReadOnlyAdmin, hasPermission } = useAuth();
+  const canEdit = !isReadOnlyAdmin && (user?.role === 'admin' || hasPermission('academic.manage'));
 
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState(null);

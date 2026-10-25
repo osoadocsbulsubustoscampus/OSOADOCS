@@ -19,13 +19,14 @@ import {
   CalendarDays,
   BookOpen,
   FileText,
-  CheckCircle2
+  CheckCircle2,
+  ShieldCheck,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { supabase } from '../supabaseClient';
 
 const Sidebar = ({ isOpen, onClose }) => {
-  const { user, logout } = useAuth();
+  const { user, logout, hasPermission, roles } = useAuth();
   const [showLogoutConfirm, setShowLogoutConfirm] = React.useState(false);
   const [inboxCount, setInboxCount] = React.useState(0);
   const [completedCount, setCompletedCount] = React.useState(0);
@@ -233,6 +234,7 @@ const Sidebar = ({ isOpen, onClose }) => {
       { name: 'My Documents', path: '/my-documents', icon: <Files size={20} /> },
       { name: 'Completed', path: '/completed', icon: <CheckCircle size={20} /> },
       { name: 'User Management', path: '/users', icon: <Users size={20} /> },
+      { name: 'Audit Trail', path: '/admin/audit-trail', icon: <ShieldCheck size={20} /> },
       { name: 'List of Requirements', path: '/requirements', icon: <ListChecks size={20} /> },
       { name: 'Announcements', path: '/admin/announcements', icon: <Megaphone size={20} /> },
       academicDatesGroup,
@@ -298,7 +300,52 @@ const Sidebar = ({ isOpen, onClose }) => {
   };
 
   const roleKey = user?.role;
-  const currentMenu = menuItems[roleKey] || menuItems['org-president'] || [];
+  let currentMenu = [];
+  if (user?.role === 'admin') {
+    currentMenu = menuItems.admin;
+  } else if (user?.role === 'org-president') {
+    currentMenu = menuItems['org-president'];
+  } else {
+    // Dynamic RBAC Menu for Custom or Institutional Staff Roles
+    const items = [
+      { name: 'Dashboard', path: '/', icon: <LayoutDashboard size={20} /> },
+    ];
+
+    if (hasPermission('documents.evaluate') || hasPermission('documents.approve') || hasPermission('documents.return') || hasPermission('documents.view')) {
+      items.push({ name: 'Inbox', path: '/inbox', icon: <Inbox size={20} /> });
+    }
+
+    if (hasPermission('documents.submit')) {
+      items.push({ name: 'Submit New Document', path: '/submit', icon: <FilePlus size={20} /> });
+    }
+
+    items.push({ name: 'My Documents', path: '/my-documents', icon: <Files size={20} /> });
+    items.push({ name: 'Completed', path: '/completed', icon: <CheckCircle size={20} /> });
+
+    if (hasPermission('users.manage') || hasPermission('roles.manage')) {
+      items.push({ name: 'User Management', path: '/users', icon: <Users size={20} /> });
+      if (user?.role === 'admin' || hasPermission('roles.manage')) {
+        items.push({ name: 'Audit Trail', path: '/admin/audit-trail', icon: <ShieldCheck size={20} /> });
+      }
+    } else if (hasPermission('users.view')) {
+      items.push({ name: 'List of Organizations', path: '/organizations', icon: <Users size={20} /> });
+    }
+
+    if (hasPermission('requirements.view') || hasPermission('requirements.manage')) {
+      items.push({ name: 'List of Requirements', path: '/requirements', icon: <ListChecks size={20} /> });
+    }
+
+    if (hasPermission('announcements.view') || hasPermission('announcements.manage')) {
+      items.push({ name: 'Announcements', path: '/admin/announcements', icon: <Megaphone size={20} /> });
+    }
+
+    if (hasPermission('academic.view') || hasPermission('academic.manage')) {
+      items.push(academicDatesGroup);
+    }
+
+    items.push({ name: 'My Profile', path: '/profile', icon: <User size={20} /> });
+    currentMenu = items;
+  }
 
   const sidebarContent = (
     <div className="w-64 h-full bg-[#073c2d] text-white flex flex-col shadow-xl border-r border-emerald-900/40">

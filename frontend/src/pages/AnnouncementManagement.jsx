@@ -19,9 +19,11 @@ import { supabase } from '../supabaseClient';
 import PageHeader from '../components/PageHeader';
 import { useToast } from '../hooks/useToast';
 import { compressImage } from '../utils/imageCompressionUtils';
+import { logAuditEvent } from '../services/auditService';
 
 const AnnouncementManagement = () => {
-  const { user } = useAuth();
+  const { user, isReadOnlyAdmin, hasPermission } = useAuth();
+  const canManage = (user?.role === 'admin' && !isReadOnlyAdmin) || (!isReadOnlyAdmin && hasPermission('announcements.manage'));
   const [announcements, setAnnouncements] = useState([]);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingId, setEditingId] = useState(null);
@@ -194,6 +196,10 @@ const AnnouncementManagement = () => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (isReadOnlyAdmin) {
+      showToast('Action disabled: Handed-over administrator account is in Read-Only mode.');
+      return;
+    }
     try {
       let currentAnnId = editingId;
       
@@ -213,12 +219,42 @@ const AnnouncementManagement = () => {
 
       if (editingId) {
         await apiClient.put(apiUrl(`/api/announcements/${editingId}`), payload);
+        try {
+          await logAuditEvent({
+            module: 'ANNOUNCEMENTS',
+            action_type: 'ANNOUNCEMENT_UPDATED',
+            action_label: `Updated announcement "${formData.title}"`,
+            target_id: String(editingId),
+            target_name: formData.title,
+            details: {
+              title: formData.title,
+              target_audience: finalAudience,
+              is_active: formData.is_active,
+            },
+            user,
+          });
+        } catch (_) {}
       } else {
         const res = await apiClient.post(apiUrl('/api/announcements'), {
           ...payload,
           created_by: user?.id
         });
         currentAnnId = res.data.data.id;
+        try {
+          await logAuditEvent({
+            module: 'ANNOUNCEMENTS',
+            action_type: 'ANNOUNCEMENT_CREATED',
+            action_label: `Published announcement "${formData.title}"`,
+            target_id: String(currentAnnId),
+            target_name: formData.title,
+            details: {
+              title: formData.title,
+              target_audience: finalAudience,
+              is_active: formData.is_active,
+            },
+            user,
+          });
+        } catch (_) {}
       }
 
       if (selectedFiles.length > 0) {
@@ -240,8 +276,26 @@ const AnnouncementManagement = () => {
 
   const confirmDeleteAnnouncement = async () => {
     if (!deleteTarget) return;
+    if (isReadOnlyAdmin) {
+      showToast('Action disabled: Handed-over administrator account is in Read-Only mode.');
+      return;
+    }
     try {
       await apiClient.delete(apiUrl(`/api/announcements/${deleteTarget.id}`));
+      try {
+        await logAuditEvent({
+          module: 'ANNOUNCEMENTS',
+          action_type: 'ANNOUNCEMENT_DELETED',
+          action_label: `Deleted announcement "${deleteTarget.title}"`,
+          target_id: String(deleteTarget.id),
+          target_name: deleteTarget.title,
+          details: {
+            title: deleteTarget.title,
+            target_audience: deleteTarget.target_audience,
+          },
+          user,
+        });
+      } catch (_) {}
       fetchAnnouncements();
       window.dispatchEvent(new CustomEvent('announcement-updated'));
       showToast('Announcement deleted successfully.');
@@ -259,6 +313,20 @@ const AnnouncementManagement = () => {
         ...ann,
         is_active: willBeActive
       });
+      try {
+        await logAuditEvent({
+          module: 'ANNOUNCEMENTS',
+          action_type: willBeActive ? 'ANNOUNCEMENT_RESTORED' : 'ANNOUNCEMENT_ARCHIVED',
+          action_label: `${willBeActive ? 'Restored announcement' : 'Archived announcement'} "${ann.title}"`,
+          target_id: String(ann.id),
+          target_name: ann.title,
+          details: {
+            title: ann.title,
+            is_active: willBeActive,
+          },
+          user,
+        });
+      } catch (_) {}
       fetchAnnouncements();
       window.dispatchEvent(new CustomEvent('announcement-updated'));
       showToast(willBeActive ? 'Announcement restored to active.' : 'Announcement archived.');
@@ -281,13 +349,15 @@ const AnnouncementManagement = () => {
           icon={Megaphone} 
           iconColor="gold" 
         />
-        <button 
-          onClick={() => openModal()}
-          className="flex items-center gap-2 bg-primary-green text-white px-4 py-2 rounded-lg hover:bg-green-700 transition-colors shrink-0 text-xs sm:text-sm font-semibold"
-        >
-          <Plus size={18} />
-          <span>New Announcement</span>
-        </button>
+        {canManage && (
+          <button 
+            onClick={() => openModal()}
+            className="flex items-center gap-2 bg-primary-green text-white px-4 py-2 rounded-lg hover:bg-green-700 transition-colors shrink-0 text-xs sm:text-sm font-semibold"
+          >
+            <Plus size={18} />
+            <span>New Announcement</span>
+          </button>
+        )}
       </div>
 
       {error && (
@@ -369,40 +439,44 @@ const AnnouncementManagement = () => {
                       {new Date(ann.created_at).toLocaleDateString()}
                     </td>
                     <td className="px-3 sm:p-4">
-                      <div className="flex items-center justify-end gap-1 sm:gap-2">
-                        <button 
-                          type="button"
-                          onClick={() => toggleActive(ann)}
-                          title={ann.is_active !== false ? "Archive announcement" : "Restore / Unarchive announcement"}
-                          className={`p-1.5 sm:p-2 rounded-lg transition-colors ${
-                            ann.is_active !== false 
-                              ? 'text-gray-400 hover:text-amber-600 hover:bg-amber-50' 
-                              : 'text-amber-600 hover:text-emerald-600 hover:bg-emerald-50'
-                          }`}
-                        >
-                          {ann.is_active !== false ? (
-                            <Archive size={16} className="sm:w-4 sm:h-4" />
-                          ) : (
-                            <ArchiveRestore size={16} className="sm:w-4 sm:h-4" />
-                          )}
-                        </button>
-                        <button 
-                          type="button"
-                          onClick={() => openModal(ann)}
-                          title="Edit announcement"
-                          className="p-1.5 sm:p-2 text-gray-400 hover:text-blue-500 hover:bg-blue-50 rounded-lg transition-colors"
-                        >
-                          <Edit2 size={16} className="sm:w-4 sm:h-4" />
-                        </button>
-                        <button 
-                          type="button"
-                          onClick={() => handleDelete(ann)}
-                          title="Delete announcement"
-                          className="p-1.5 sm:p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
-                        >
-                          <Trash2 size={16} className="sm:w-4 sm:h-4" />
-                        </button>
-                      </div>
+                      {!canManage ? (
+                        <span className="text-xs text-gray-400 italic">View Only</span>
+                      ) : (
+                        <div className="flex items-center justify-end gap-1 sm:gap-2">
+                          <button 
+                            type="button"
+                            onClick={() => toggleActive(ann)}
+                            title={ann.is_active !== false ? "Archive announcement" : "Restore / Unarchive announcement"}
+                            className={`p-1.5 sm:p-2 rounded-lg transition-colors ${
+                              ann.is_active !== false 
+                                ? 'text-gray-400 hover:text-amber-600 hover:bg-amber-50' 
+                                : 'text-amber-600 hover:text-emerald-600 hover:bg-emerald-50'
+                            }`}
+                          >
+                            {ann.is_active !== false ? (
+                              <Archive size={16} className="sm:w-4 sm:h-4" />
+                            ) : (
+                              <ArchiveRestore size={16} className="sm:w-4 sm:h-4" />
+                            )}
+                          </button>
+                          <button 
+                            type="button"
+                            onClick={() => openModal(ann)}
+                            title="Edit announcement"
+                            className="p-1.5 sm:p-2 text-gray-400 hover:text-blue-500 hover:bg-blue-50 rounded-lg transition-colors"
+                          >
+                            <Edit2 size={16} className="sm:w-4 sm:h-4" />
+                          </button>
+                          <button 
+                            type="button"
+                            onClick={() => handleDelete(ann)}
+                            title="Delete announcement"
+                            className="p-1.5 sm:p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                          >
+                            <Trash2 size={16} className="sm:w-4 sm:h-4" />
+                          </button>
+                        </div>
+                      )}
                     </td>
                   </tr>
                 ))}

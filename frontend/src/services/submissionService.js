@@ -1,5 +1,6 @@
 import { supabase } from '../supabaseClient';
 import { apiFetch } from '../config/api';
+import { logAuditEvent } from './auditService';
 
 /**
  * LOGGING SERVICE
@@ -454,6 +455,22 @@ export const submitForReview = async (submissionId, versionId, userId) => {
   }
 
   await createLog(submissionId, userId, 'Document submitted for review.', versionId, 'submission', 'submitted');
+
+  try {
+    await logAuditEvent({
+      module: 'DOCUMENTS',
+      action_type: 'DOCUMENT_SUBMITTED',
+      action_label: `Submitted document "${finalTrackingNumber}" for evaluation`,
+      target_id: String(submissionId),
+      target_name: finalTrackingNumber,
+      details: {
+        tracking_number: finalTrackingNumber,
+        submission_id: submissionId,
+      },
+    });
+  } catch (auditErr) {
+    console.warn('[Audit Log] Failed to log document submission:', auditErr);
+  }
 };
 
 /**
@@ -577,6 +594,52 @@ export const transitionSubmission = async (submissionId, action, comment = '', a
   if (!response.ok) {
     throw new Error(resData.error || resData.details || 'Failed to transition submission workflow state');
   }
+
+  // Centralized audit trail recording for document workflow actions
+  try {
+    const actionMap = {
+      'approve': 'DOCUMENT_APPROVED',
+      'return': 'DOCUMENT_RETURNED',
+      'disapprove': 'DOCUMENT_DISAPPROVED',
+      'forward': 'DOCUMENT_FORWARDED',
+      'send_to_external': 'DOCUMENT_FORWARDED',
+      'ready_for_retrieval': 'DOCUMENT_READY_FOR_RETRIEVAL',
+      'document_retrieved': 'DOCUMENT_RETRIEVED',
+      'confirm_retrieval': 'DOCUMENT_RETRIEVAL_CONFIRMED',
+    };
+
+    const trackingNum = resData?.submission?.tracking_number || `Submission #${String(submissionId).slice(0, 8)}`;
+    const docTypeName = resData?.workflow?.documentTypeName || 'Document';
+    const stageLabel = resData?.workflow?.displayLabel || '';
+
+    let label = `Updated ${docTypeName} "${trackingNum}"`;
+    if (action === 'approve') label = `Approved ${docTypeName} "${trackingNum}" (${stageLabel || 'Approved'})`;
+    else if (action === 'return') label = `Returned ${docTypeName} "${trackingNum}" for revision`;
+    else if (action === 'disapprove') label = `Disapproved ${docTypeName} "${trackingNum}"`;
+    else if (action === 'forward' || action === 'send_to_external') label = `Forwarded ${docTypeName} "${trackingNum}" (${stageLabel || 'Main Campus'})`;
+    else if (action === 'ready_for_retrieval') label = `Marked ${docTypeName} "${trackingNum}" ready for retrieval`;
+    else if (action === 'document_retrieved') label = `Retrieved physical copy of ${docTypeName} "${trackingNum}"`;
+    else if (action === 'confirm_retrieval') label = `Confirmed retrieval of ${docTypeName} "${trackingNum}"`;
+
+    await logAuditEvent({
+      module: 'DOCUMENTS',
+      action_type: actionMap[action] || `DOCUMENT_${String(action).toUpperCase()}`,
+      action_label: label,
+      target_id: String(submissionId),
+      target_name: trackingNum,
+      details: {
+        tracking_number: trackingNum,
+        document_type: docTypeName,
+        action,
+        stage: stageLabel,
+        comment: comment || null,
+        organization_name: resData?.submission?.users?.org_name || null,
+      },
+    });
+  } catch (auditErr) {
+    console.warn('[Audit Log] Failed to log document workflow transition:', auditErr);
+  }
+
   return resData;
 };
 
@@ -602,6 +665,26 @@ export const resubmitSubmission = async (submissionId, userId, oldVersionId = nu
   if (!response.ok) {
     throw new Error(resData.error || resData.details || 'Failed to complete resubmission workflow transition');
   }
+
+  // Centralized audit trail recording for resubmission
+  try {
+    const trackingNum = resData?.submission?.tracking_number || `Submission #${String(submissionId).slice(0, 8)}`;
+    await logAuditEvent({
+      module: 'DOCUMENTS',
+      action_type: 'DOCUMENT_RESUBMITTED',
+      action_label: `Resubmitted document "${trackingNum}" with revisions`,
+      target_id: String(submissionId),
+      target_name: trackingNum,
+      details: {
+        tracking_number: trackingNum,
+        old_version_id: oldVersionId,
+        organization_name: resData?.submission?.users?.org_name || null,
+      },
+    });
+  } catch (auditErr) {
+    console.warn('[Audit Log] Failed to log document resubmission:', auditErr);
+  }
+
   return resData;
 };
 

@@ -98,6 +98,7 @@ async function getDefaultAdminUserId(supabase: ReturnType<typeof getAdminClient>
     .from('users')
     .select('id')
     .eq('role', 'admin')
+    .eq('status', 'Active')
     .limit(1)
     .maybeSingle();
 
@@ -412,10 +413,20 @@ async function checkAndSuspendLateUsers() {
 async function handleGetAdminEmail() {
   const supabase = getAdminClient();
   try {
-    const { data: profiles, error: profileError } = await supabase
+    let { data: profiles, error: profileError } = await supabase
       .from('users')
       .select('id, role, contact_no')
-      .eq('role', 'admin');
+      .eq('role', 'admin')
+      .eq('status', 'Active');
+
+    if (!profiles || profiles.length === 0) {
+      // Fallback if status hasn't been set yet on existing admin
+      const { data: fallbackProfiles } = await supabase
+        .from('users')
+        .select('id, role, contact_no')
+        .eq('role', 'admin');
+      profiles = fallbackProfiles;
+    }
 
     if (profileError || !profiles || profiles.length === 0) {
       console.warn('Admin profile not found in users table:', profileError?.message);
@@ -1160,6 +1171,58 @@ async function handleSetupPassword(body: Record<string, unknown>) {
     .update({ status: 'Active' })
     .eq('id', inv.user_id);
 
+  // Check if this newly activated user is an admin (e.g. via ownership transfer)
+  const { data: activatedUser } = await supabase
+    .from('users')
+    .select('id, role, full_name')
+    .eq('id', inv.user_id)
+    .maybeSingle();
+
+  if (activatedUser?.role === 'admin') {
+    // Locate previous active admin(s)
+    const { data: previousAdmins } = await supabase
+      .from('users')
+      .select('id, full_name')
+      .eq('role', 'admin')
+      .neq('id', inv.user_id)
+      .eq('status', 'Active');
+
+    if (previousAdmins && previousAdmins.length > 0) {
+      const emailMap = await getAuthEmailsMap();
+      for (const oldAdmin of previousAdmins) {
+        // Demote old admin to read-only status
+        await supabase
+          .from('users')
+          .update({
+            status: 'Handed Over (Read-Only)',
+          })
+          .eq('id', oldAdmin.id);
+
+        // Terminate any active sessions of the former admin
+        try {
+          await supabase.auth.admin.signOut(oldAdmin.id);
+        } catch (soErr) {
+          console.warn('Session signout warning for former admin:', soErr);
+        }
+
+        const oldAdminEmail = emailMap.get(oldAdmin.id) || 'Previous Admin';
+        const newAdminEmail = activatedUser ? (emailMap.get(activatedUser.id) || inv.email) : inv.email;
+
+        // Create an audit log record
+        try {
+          await supabase.from('submission_logs').insert([{
+            user_id: inv.user_id,
+            action_type: 'admin_transfer',
+            description: `Primary Administrator ownership transferred from ${oldAdmin.full_name || 'Previous Admin'} (${oldAdminEmail}) to ${activatedUser.full_name || 'New Admin'} (${newAdminEmail}).`,
+            created_at: new Date().toISOString(),
+          }]);
+        } catch (logErr) {
+          console.warn('Audit log write error:', logErr);
+        }
+      }
+    }
+  }
+
   // Mark token as used
   await supabase
     .from('account_invitations')
@@ -1174,7 +1237,7 @@ async function handleSetupPassword(body: Record<string, unknown>) {
     success: true,
     email: inv.email,
     userId: inv.user_id,
-    message: 'Password created successfully! You can now access your Organization Dashboard.',
+    message: 'Password created successfully! You can now access your Dashboard.',
   });
 }
 
@@ -1197,14 +1260,6 @@ async function handleRequestNewInvitation(body: Record<string, unknown>, req: Re
     }
   }
 
-  if (!targetUserId) {
-    const { data: dbUser } = await supabase
-      .from('users')
-      .select('id, full_name, org_name, role')
-      .eq('email', email)
-      .maybeSingle();
-    if (dbUser) targetUserId = dbUser.id;
-  }
 
   if (!targetUserId) {
     return jsonResponse({
@@ -1280,6 +1335,285 @@ async function handleResendInvitation(body: Record<string, unknown>, req: Reques
   return jsonResponse({
     success: true,
     message: `Invitation email sent to ${email} via Brevo!`,
+  });
+}
+
+async function verifyUserCredentials(email: string, password: string) {
+  const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
+  const anonKey = Deno.env.get('SUPABASE_ANON_KEY') ?? Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
+  const authClient = createClient(supabaseUrl, anonKey, {
+    auth: {
+      autoRefreshToken: false,
+      persistSession: false,
+    },
+  });
+
+  return await authClient.auth.signInWithPassword({
+    email,
+    password,
+  });
+}
+
+async function handleTransferAdminOwnership(body: Record<string, unknown>, req?: Request) {
+  const supabase = getAdminClient();
+  const adminEmail = String(body.adminEmail || '').trim().toLowerCase();
+  const adminPassword = String(body.adminPassword || '');
+  const successorName = String(body.successorName || '').trim();
+  const successorEmail = String(body.successorEmail || '').trim().toLowerCase();
+  const successorContact = String(body.successorContact || '').trim();
+  const appOrigin = (body.appOrigin as string) || (req ? (req.headers.get('origin') || req.headers.get('referer')) : null) || 'http://localhost:5173';
+
+  if (!adminEmail || !adminPassword) {
+    return jsonResponse({ error: 'Current admin email and password are required for verification.' }, 400);
+  }
+  if (!successorName || !successorEmail) {
+    return jsonResponse({ error: 'Successor full name and email are required.' }, 400);
+  }
+  if (successorEmail === adminEmail) {
+    return jsonResponse({ error: 'Successor email cannot be the same as the current administrator email.' }, 400);
+  }
+
+  // 1. Verify current admin credentials with an isolated auth client
+  const { data: authData, error: authError } = await verifyUserCredentials(adminEmail, adminPassword);
+
+  if (authError || !authData?.user) {
+    return jsonResponse({ error: 'Verification failed: Incorrect administrator password.' }, 401);
+  }
+
+  // 2. Verify caller is an ACTIVE admin
+  const { data: currentAdminUser, error: adminProfileErr } = await supabase
+    .from('users')
+    .select('id, full_name, role, status')
+    .eq('id', authData.user.id)
+    .maybeSingle();
+
+  if (adminProfileErr || !currentAdminUser || currentAdminUser.role !== 'admin' || currentAdminUser.status !== 'Active') {
+    return jsonResponse({ error: 'Unauthorized: Only the currently active Primary Administrator can initiate an ownership transfer.' }, 403);
+  }
+
+  // 3. Check if successor already exists as an auth user or active admin
+  const emailMap = await getAuthEmailsMap();
+  let successorAuthId: string | null = null;
+  for (const [uid, uemail] of emailMap.entries()) {
+    if (uemail.toLowerCase() === successorEmail) {
+      successorAuthId = uid;
+      break;
+    }
+  }
+
+  if (successorAuthId) {
+    const { data: existingSuccessorProfile } = await supabase
+      .from('users')
+      .select('id, role, status')
+      .eq('id', successorAuthId)
+      .maybeSingle();
+
+    if (existingSuccessorProfile && existingSuccessorProfile.role === 'admin' && existingSuccessorProfile.status === 'Active') {
+      return jsonResponse({ error: 'The specified email address already belongs to an active administrator.' }, 400);
+    }
+  }
+
+  // 4. Create or obtain auth user for successor
+  const authPassword = crypto.randomUUID() + 'A1!@#';
+
+  if (!successorAuthId) {
+    const { data: newAuth, error: createAuthErr } = await supabase.auth.admin.createUser({
+      email: successorEmail,
+      password: authPassword,
+      email_confirm: true,
+      user_metadata: { full_name: successorName, role: 'admin' },
+    });
+
+    if (createAuthErr || !newAuth?.user) {
+      return jsonResponse({ error: 'Failed to create successor authentication account: ' + (createAuthErr?.message || 'Unknown error') }, 500);
+    }
+    successorAuthId = newAuth.user.id;
+  }
+
+  // 5. Upsert profile in public.users table with role 'admin' and status 'Pending Handover'
+  const { error: upsertErr } = await supabase
+    .from('users')
+    .upsert({
+      id: successorAuthId,
+      full_name: successorName,
+      contact_no: successorContact || null,
+      role: 'admin',
+      status: 'Pending Handover',
+    });
+
+  if (upsertErr) {
+    return jsonResponse({ error: 'Failed to update successor profile: ' + upsertErr.message }, 500);
+  }
+
+  // 6. Generate token in account_invitations
+  const token = crypto.randomUUID().replace(/-/g, '') + Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('');
+  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(); // 24 hours
+
+  await supabase
+    .from('account_invitations')
+    .update({ is_invalidated: true, updated_at: new Date().toISOString() })
+    .eq('user_id', successorAuthId)
+    .eq('is_used', false);
+
+  const { error: invErr } = await supabase
+    .from('account_invitations')
+    .insert([{
+      user_id: successorAuthId,
+      email: successorEmail,
+      token,
+      expires_at: expiresAt,
+      is_used: false,
+      is_invalidated: false,
+    }]);
+
+  if (invErr) {
+    return jsonResponse({ error: 'Failed to create invitation record: ' + invErr.message }, 500);
+  }
+
+  // 7. Send official Handover Email via Brevo
+  const origin = appOrigin ? appOrigin.replace(/\/$/, '') : 'http://localhost:5173';
+  const setupUrl = `${origin}/setup-account?token=${token}`;
+  const subject = `Action Required: Transfer of OSOADOCS Primary Administrator Ownership`;
+
+  const htmlContent = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <title>OSOADOCS - Administrator Ownership Transfer</title>
+      <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f6f8; margin: 0; padding: 0; color: #333; }
+        .container { max-width: 600px; margin: 30px auto; background: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.08); }
+        .header { background-color: #073c2d; padding: 30px 20px; text-align: center; color: #ffffff; }
+        .header h1 { margin: 0; font-size: 24px; font-weight: 700; letter-spacing: 0.5px; }
+        .header p { margin: 6px 0 0 0; font-size: 14px; opacity: 0.85; }
+        .content { padding: 35px 30px; line-height: 1.6; }
+        .greeting { font-size: 18px; font-weight: 600; color: #073c2d; margin-bottom: 16px; }
+        .button-wrapper { text-align: center; margin: 35px 0; }
+        .btn { background-color: #073c2d; color: #ffffff !important; padding: 14px 32px; text-decoration: none; font-weight: 700; font-size: 15px; border-radius: 12px; display: inline-block; box-shadow: 0 4px 12px rgba(7,60,45,0.25); }
+        .info-box { background-color: #f8faf9; border-left: 4px solid #073c2d; padding: 16px; border-radius: 8px; margin: 24px 0; font-size: 13px; color: #555; }
+        .footer { background-color: #f4f6f8; padding: 20px; text-align: center; font-size: 12px; color: #888; border-top: 1px solid #eef0f2; }
+      </style>
+    </head>
+    <body>
+      <div class="container">
+        <div class="header">
+          <h1>OSOADOCS</h1>
+          <p>Office of Student Organizations and Activities</p>
+        </div>
+        <div class="content">
+          <div class="greeting">Hello, ${successorName}!</div>
+          <p>The current Primary Administrator, <strong>${currentAdminUser.full_name || adminEmail}</strong>, has initiated the official transfer of Primary Administrator Ownership for the <strong>OSOADOCS</strong> platform to you.</p>
+          <p>By completing this setup, you will become the new Primary Administrator with full privileges over institutional users, document approvals, and system settings.</p>
+          
+          <div class="button-wrapper">
+            <a href="${setupUrl}" class="btn" target="_blank">Accept & Set Up Admin Account</a>
+          </div>
+
+          <div class="info-box">
+            <strong>Transfer & Security Notice:</strong>
+            <ul style="margin: 6px 0 0 0; padding-left: 18px;">
+              <li>This invitation link is valid for <strong>24 hours</strong>.</li>
+              <li>Once you activate your password, the previous administrator's account will automatically transition to Read-Only Mode.</li>
+              <li>Ensure your account credentials are kept safe and adhere to university guidelines.</li>
+            </ul>
+          </div>
+
+          <p style="font-size: 13px; color: #777;">If you did not expect this transfer, please reach out directly to the Office of Student Organizations.</p>
+        </div>
+        <div class="footer">
+          &copy; ${new Date().getFullYear()} Bulacan State University - Office of Student Organizations and Activities. All rights reserved.
+        </div>
+      </div>
+    </body>
+    </html>
+  `;
+
+  const emailRes = await sendBrevoEmail({
+    toEmail: successorEmail,
+    toName: successorName,
+    subject,
+    htmlContent,
+  });
+
+  return jsonResponse({
+    success: true,
+    message: `Administrator ownership invitation sent to ${successorEmail} successfully.`,
+    token,
+    emailSent: emailRes.success,
+  });
+}
+
+async function handleDeactivateFormerAdmin(body: Record<string, unknown>) {
+  const supabase = getAdminClient();
+  const adminEmail = String(body.adminEmail || '').trim().toLowerCase();
+  const adminPassword = String(body.adminPassword || '');
+  const formerAdminId = String(body.formerAdminId || '').trim();
+
+  if (!adminEmail || !adminPassword || !formerAdminId) {
+    return jsonResponse({ error: 'Admin credentials and formerAdminId are required.' }, 400);
+  }
+
+  // 1. Verify calling admin credentials with an isolated auth client
+  const { data: authData, error: authError } = await verifyUserCredentials(adminEmail, adminPassword);
+
+  if (authError || !authData?.user) {
+    return jsonResponse({ error: 'Incorrect administrator password.' }, 401);
+  }
+
+  // 2. Verify calling admin is ACTIVE admin
+  const { data: activeAdmin } = await supabase
+    .from('users')
+    .select('id, full_name, role, status')
+    .eq('id', authData.user.id)
+    .maybeSingle();
+
+  if (!activeAdmin || activeAdmin.role !== 'admin' || activeAdmin.status !== 'Active') {
+    return jsonResponse({ error: 'Only the active Primary Administrator can deactivate former admin accounts.' }, 403);
+  }
+
+  // 3. Verify target is indeed a former admin in read-only status
+  const { data: targetUser } = await supabase
+    .from('users')
+    .select('id, full_name, role, status')
+    .eq('id', formerAdminId)
+    .maybeSingle();
+
+  if (!targetUser || targetUser.role !== 'admin' || targetUser.status !== 'Handed Over (Read-Only)') {
+    return jsonResponse({ error: 'Target user is not a former administrator in Read-Only status.' }, 400);
+  }
+
+  // 4. Update status to Inactive
+  await supabase
+    .from('users')
+    .update({ status: 'Inactive' })
+    .eq('id', formerAdminId);
+
+  // Terminate any remaining sessions
+  try {
+    await supabase.auth.admin.signOut(formerAdminId);
+  } catch (err) {
+    console.warn('Signout warning during deactivation:', err);
+  }
+
+  const emailMap = await getAuthEmailsMap();
+  const formerEmail = emailMap.get(formerAdminId) || 'Former Admin';
+
+  // 5. Add audit log
+  try {
+    await supabase.from('submission_logs').insert([{
+      user_id: activeAdmin.id,
+      action_type: 'admin_deactivation',
+      description: `Former administrator ${targetUser.full_name || 'Admin'} (${formerEmail}) was deactivated by Primary Administrator ${activeAdmin.full_name || 'Admin'}.`,
+      created_at: new Date().toISOString(),
+    }]);
+  } catch (logErr) {
+    console.warn('Audit log write error:', logErr);
+  }
+
+  return jsonResponse({
+    success: true,
+    message: `Former administrator account (${targetUser.full_name || formerEmail}) has been deactivated.`,
   });
 }
 
@@ -3136,6 +3470,13 @@ async function handlePostAcademicEvents(body: Record<string, unknown>) {
   if (!isUuid(document_type_id)) document_type_id = null;
   if (!isUuid(semester_id)) semester_id = null;
 
+  if (created_by) {
+    const { data: creator } = await supabase.from('users').select('status').eq('id', created_by).maybeSingle();
+    if (creator?.status === 'Handed Over (Read-Only)') {
+      return jsonResponse({ error: 'Unauthorized: Handed-over administrator account is in Read-Only mode. Mutations are disabled.' }, 403);
+    }
+  }
+
   // Fallback for created_by if null to satisfy NOT NULL constraint
   if (!created_by) {
     const { data: adminUser } = await supabase.from('users').select('id').eq('role', 'admin').limit(1).maybeSingle();
@@ -3260,6 +3601,14 @@ async function handlePostAcademicEvents(body: Record<string, unknown>) {
 
 async function handlePutAcademicEvents(id: string, body: Record<string, unknown>) {
   const supabase = getAdminClient();
+  const modifierId = (body.userId as string) || (body.created_by as string);
+  if (modifierId) {
+    const { data: modifier } = await supabase.from('users').select('status').eq('id', modifierId).maybeSingle();
+    if (modifier?.status === 'Handed Over (Read-Only)') {
+      return jsonResponse({ error: 'Unauthorized: Handed-over administrator account is in Read-Only mode. Mutations are disabled.' }, 403);
+    }
+  }
+
   let { title, description, event_type, document_type_id, start_date, end_date } = body as Record<string, unknown>;
 
   if (event_type === 'school_event') {
@@ -4598,12 +4947,19 @@ export const WORKFLOW_CONFIGS: Record<string, {
   }
 };
 
-export function getAllowedActionsForStage(cfgKey: string, stage: WorkflowStageKey, role: string): string[] {
+export function getAllowedActionsForStage(cfgKey: string, stage: WorkflowStageKey, role: string, userPermissions?: string[]): string[] {
   const cfg = WORKFLOW_CONFIGS[cfgKey] || WORKFLOW_CONFIGS.ACTIVITY_PROPOSAL;
   const allowedForStage = cfg.allowedRoles[stage] || [];
   const normRole = (role || '').toLowerCase();
 
-  const isRoleAllowed = allowedForStage.some(r => r.toLowerCase() === normRole);
+  let isRoleAllowed = allowedForStage.some(r => r.toLowerCase() === normRole);
+  if (!isRoleAllowed && userPermissions && Array.isArray(userPermissions)) {
+    if (userPermissions.includes('documents.approve') || userPermissions.includes('documents.return')) {
+      if (stage !== 'DRAFT' && stage !== 'RETURNED' && stage !== 'SUBMISSION') {
+        isRoleAllowed = true;
+      }
+    }
+  }
   if (!isRoleAllowed) return [];
 
   const stageTransitions = cfg.transitions[stage] || {};
@@ -4930,15 +5286,37 @@ async function handleSubmissionTransition(body: Record<string, unknown>) {
 
   let actingUserRole = 'admin';
   let actingUserId = userId;
+  let userPermissions: string[] = [];
   if (userId) {
-    const { data: userRec } = await supabase.from('users').select('id, role, full_name').eq('id', userId).maybeSingle();
+    const { data: userRec } = await supabase.from('users').select('id, role, full_name, status').eq('id', userId).maybeSingle();
     if (userRec) {
+      if (userRec.status === 'Handed Over (Read-Only)') {
+        return jsonResponse({ error: 'Unauthorized: Handed-over administrator account is in Read-Only mode. Document decisions and workflow actions are disabled.' }, 403);
+      }
       actingUserRole = userRec.role;
       actingUserId = userRec.id;
+
+      const { data: roleRec } = await supabase.from('roles').select('permissions').eq('slug', userRec.role).maybeSingle();
+      if (roleRec?.permissions && Array.isArray(roleRec.permissions)) {
+        userPermissions = roleRec.permissions;
+      }
     }
   } else {
     actingUserId = sub.user_id;
     actingUserRole = (sub.users as Record<string, unknown>)?.role as string || 'admin';
+  }
+
+  // Enforce document permission checks for non-admin accounts
+  if (actingUserRole !== 'admin' && userPermissions.length > 0) {
+    if (action === 'approve' && !userPermissions.includes('documents.approve')) {
+      return jsonResponse({ error: 'Unauthorized: Your role does not have permission to approve documents.' }, 403);
+    }
+    if (action === 'return' && !userPermissions.includes('documents.return')) {
+      return jsonResponse({ error: 'Unauthorized: Your role does not have permission to return documents.' }, 403);
+    }
+    if (action === 'disapprove' && !userPermissions.includes('documents.disapprove')) {
+      return jsonResponse({ error: 'Unauthorized: Your role does not have permission to disapprove documents.' }, 403);
+    }
   }
 
   const docTypeName = (sub.documentType as Record<string, unknown>)?.name as string || 'Activity Proposal';
@@ -4946,7 +5324,7 @@ async function handleSubmissionTransition(body: Record<string, unknown>) {
   const currentStage = normalizeStatusToStage(sub.status);
   const cfg = WORKFLOW_CONFIGS[docTypeKey] || WORKFLOW_CONFIGS.ACTIVITY_PROPOSAL;
 
-  const allowedActions = getAllowedActionsForStage(docTypeKey, currentStage, actingUserRole);
+  const allowedActions = getAllowedActionsForStage(docTypeKey, currentStage, actingUserRole, userPermissions);
   if (!allowedActions.includes(action)) {
     return jsonResponse({
       error: `Invalid action '${action}' for current stage '${STAGE_DISPLAY_LABELS[currentStage]}' on document type '${docTypeKey}' for role '${actingUserRole}'`,
@@ -5277,7 +5655,14 @@ async function handleVerifyLoginOtp(body: any) {
       const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(); // 30 days
 
       // Find user id if available
-      const { data: userRec } = await supabase.from('users').select('id').eq('email', email).maybeSingle();
+      const emailMap = await getAuthEmailsMap();
+      let matchedUserId: string | null = null;
+      for (const [uid, uemail] of emailMap.entries()) {
+        if (uemail.toLowerCase() === email) {
+          matchedUserId = uid;
+          break;
+        }
+      }
 
       // Clean up previous tokens for this email & agent
       if (userAgent) {
@@ -5292,7 +5677,7 @@ async function handleVerifyLoginOtp(body: any) {
         .from('user_trusted_devices')
         .insert([
           {
-            user_id: userRec?.id || null,
+            user_id: matchedUserId || null,
             email,
             device_token: deviceToken,
             user_agent: userAgent || null,
@@ -5358,11 +5743,212 @@ async function handleCheckTrustedDevice(body: any) {
   }
 }
 
+async function handleGetRoles() {
+  const supabase = getAdminClient();
+  const { data: roles, error } = await supabase
+    .from('roles')
+    .select('*')
+    .order('is_system', { ascending: false })
+    .order('name', { ascending: true });
+
+  if (error) {
+    return jsonResponse({ error: 'Failed to fetch roles', details: error.message }, 500);
+  }
+
+  // Count active users per role
+  const { data: users } = await supabase.from('users').select('role');
+  const counts: Record<string, number> = {};
+  (users || []).forEach((u: any) => {
+    if (u.role) {
+      counts[u.role] = (counts[u.role] || 0) + 1;
+    }
+  });
+
+  const rolesWithCounts = (roles || []).map((r: any) => ({
+    ...r,
+    user_count: counts[r.slug] || 0,
+  }));
+
+  return jsonResponse(rolesWithCounts);
+}
+
+async function handlePostRole(body: Record<string, unknown>) {
+  const name = String(body.name || '').trim();
+  const description = body.description ? String(body.description).trim() : null;
+  const permissions = Array.isArray(body.permissions) ? body.permissions : [];
+
+  if (!name) {
+    return jsonResponse({ error: 'Role name is required' }, 400);
+  }
+
+  let slug = String(body.slug || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+
+  if (!slug) {
+    slug = name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+  }
+
+  if (!slug) {
+    return jsonResponse({ error: 'Invalid role name or slug' }, 400);
+  }
+
+  const supabase = getAdminClient();
+
+  const { data: existing } = await supabase
+    .from('roles')
+    .select('id, slug')
+    .eq('slug', slug)
+    .maybeSingle();
+
+  if (existing) {
+    return jsonResponse({ error: `A role with identifier "${slug}" already exists.` }, 400);
+  }
+
+  const newRole = {
+    id: crypto.randomUUID(),
+    slug,
+    name,
+    description,
+    is_system: false,
+    permissions,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+
+  const { data, error } = await supabase
+    .from('roles')
+    .insert([newRole])
+    .select()
+    .single();
+
+  if (error) {
+    return jsonResponse({ error: 'Failed to create role', details: error.message }, 500);
+  }
+
+  return jsonResponse({ ...data, user_count: 0 }, 201);
+}
+
+async function handlePutRole(id: string, body: Record<string, unknown>) {
+  if (!id) return jsonResponse({ error: 'Role ID is required' }, 400);
+
+  const supabase = getAdminClient();
+  const { data: role, error: findErr } = await supabase
+    .from('roles')
+    .select('*')
+    .eq('id', id)
+    .maybeSingle();
+
+  if (findErr || !role) {
+    return jsonResponse({ error: 'Role not found' }, 404);
+  }
+
+  const updates: Record<string, unknown> = {
+    updated_at: new Date().toISOString(),
+  };
+
+  if (body.name !== undefined) {
+    const name = String(body.name || '').trim();
+    if (!name) return jsonResponse({ error: 'Role name cannot be empty' }, 400);
+    updates.name = name;
+  }
+
+  if (body.description !== undefined) {
+    updates.description = body.description ? String(body.description).trim() : null;
+  }
+
+  if (body.permissions !== undefined) {
+    let perms = Array.isArray(body.permissions) ? body.permissions : [];
+    if (role.slug === 'admin') {
+      const required = ['users.manage', 'roles.manage', 'admin.transfer'];
+      for (const reqPerm of required) {
+        if (!perms.includes(reqPerm)) {
+          perms.push(reqPerm);
+        }
+      }
+    }
+    updates.permissions = perms;
+  }
+
+  const { data, error } = await supabase
+    .from('roles')
+    .update(updates)
+    .eq('id', id)
+    .select()
+    .single();
+
+  if (error) {
+    return jsonResponse({ error: 'Failed to update role', details: error.message }, 500);
+  }
+
+  const { count } = await supabase
+    .from('users')
+    .select('*', { count: 'exact', head: true })
+    .eq('role', role.slug);
+
+  return jsonResponse({ ...data, user_count: count || 0 });
+}
+
+async function handleDeleteRole(id: string) {
+  if (!id) return jsonResponse({ error: 'Role ID is required' }, 400);
+
+  const supabase = getAdminClient();
+  const { data: role, error: findErr } = await supabase
+    .from('roles')
+    .select('*')
+    .eq('id', id)
+    .maybeSingle();
+
+  if (findErr || !role) {
+    return jsonResponse({ error: 'Role not found' }, 404);
+  }
+
+  if (role.is_system) {
+    return jsonResponse({ error: 'Default system roles cannot be deleted.' }, 400);
+  }
+
+  const { data: assignedUsers } = await supabase
+    .from('users')
+    .select('id, full_name')
+    .eq('role', role.slug);
+
+  if (assignedUsers && assignedUsers.length > 0) {
+    return jsonResponse({
+      error: `Cannot delete role "${role.name}" because it is currently assigned to ${assignedUsers.length} user(s). Please reassign or update those accounts before deleting this role.`,
+    }, 400);
+  }
+
+  const { error: delErr } = await supabase
+    .from('roles')
+    .delete()
+    .eq('id', id);
+
+  if (delErr) {
+    return jsonResponse({ error: 'Failed to delete role', details: delErr.message }, 500);
+  }
+
+  return jsonResponse({ success: true, message: `Role "${role.name}" was successfully deleted.` });
+}
+
 async function routeRequest(req: Request): Promise<Response> {
   const url = new URL(req.url);
   const path = normalizePath(url.pathname);
   const method = req.method.toUpperCase();
   const body = method === 'GET' ? {} : await readBody(req);
+
+  if (method === 'GET' && path === '/roles') return handleGetRoles();
+  if (method === 'POST' && path === '/roles') return handlePostRole(body);
+  if (method === 'PUT' && /^\/roles\/[^/]+$/.test(path)) {
+    return handlePutRole(path.split('/')[2], body);
+  }
+  if (method === 'DELETE' && /^\/roles\/[^/]+$/.test(path)) {
+    return handleDeleteRole(path.split('/')[2]);
+  }
 
   if (method === 'POST' && path === '/auth/send-login-otp') return handleSendLoginOtp(body);
   if (method === 'POST' && path === '/auth/verify-login-otp') return handleVerifyLoginOtp(body);
@@ -5468,6 +6054,9 @@ async function routeRequest(req: Request): Promise<Response> {
   if (method === 'GET' && path === '/system/admin-email') {
     return handleGetAdminEmail();
   }
+  if (method === 'POST' && path === '/admin/transfer-ownership') return handleTransferAdminOwnership(body, req);
+  if (method === 'POST' && path === '/admin/deactivate-former-admin') return handleDeactivateFormerAdmin(body);
+
   if (method === 'GET' && path === '/common-errors') return handleGetCommonErrors();
   if (method === 'GET' && path === '/admin/dashboard') return handleAdminDashboard();
   if (method === 'GET' && path === '/org/dashboard') return handleOrgDashboard(url);

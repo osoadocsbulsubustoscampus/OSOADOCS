@@ -9,8 +9,8 @@ import { SubmissionWindowsTab } from '../components/academic/SubmissionWindowsTa
 import { EventModal } from '../components/academic/EventModal';
 
 const SubmissionWindowsPage = () => {
-  const { user } = useAuth();
-  const canEdit = user?.role === 'admin';
+  const { user, isReadOnlyAdmin, hasPermission } = useAuth();
+  const canEdit = !isReadOnlyAdmin && (user?.role === 'admin' || hasPermission('academic.manage'));
 
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState(null);
@@ -133,6 +133,10 @@ const SubmissionWindowsPage = () => {
       if (!payload.end_date) payload.end_date = null;
       payload.blocks_activity = false;
 
+      if (isReadOnlyAdmin) {
+        showMessage('Action disabled: Handed-over administrator account is in Read-Only mode.', 'error');
+        return;
+      }
       const res = await apiFetch(path, {
         method,
         body: JSON.stringify(payload),
@@ -152,6 +156,10 @@ const SubmissionWindowsPage = () => {
   };
 
   const deleteEvent = async (id) => {
+    if (isReadOnlyAdmin) {
+      showMessage('Action disabled: Handed-over administrator account is in Read-Only mode.', 'error');
+      return;
+    }
     if (!window.confirm('Are you sure you want to delete this submission window?')) return;
     try {
       const res = await apiFetch(`/api/academic-events/${id}`, { method: 'DELETE' });

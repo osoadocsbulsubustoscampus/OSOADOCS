@@ -21,6 +21,7 @@ import {
 } from './pages/Pages';
 import Completed from './pages/Completed';
 import UserManagement from './pages/UserManagement';
+import AuditTrailPage from './pages/AuditTrailPage';
 import MyProfile from './pages/MyProfile';
 import ResetPassword from './pages/ResetPassword';
 import SetupAccount from './pages/SetupAccount';
@@ -45,77 +46,89 @@ const App = () => {
             <Route path="/inbox" element={<Inbox />} />
             <Route path="/my-documents" element={<MyDocuments />} />
             <Route path="/requirements" element={<ListOfRequirements />} />
+            {/* Requirements Configuration */}
             <Route path="/requirements/settings/:typeId" element={
-              <ProtectedRoute allowedRoles={['admin', 'chairman', 'vice-chairman']}>
+              <ProtectedRoute requiredPermission="requirements.manage" allowedRoles={['admin', 'chairman', 'vice-chairman']}>
                 <DocumentTypeSettings />
               </ProtectedRoute>
             } />
             <Route path="/profile" element={<MyProfile />} />
             
-            {/* Organizations Directory (Read-only for Chairman, Vice Chairman, etc.) */}
+            {/* Organizations Directory */}
             <Route path="/organizations" element={
-              <ProtectedRoute allowedRoles={['admin', 'chairman', 'vice-chairman', 'vice chairman', 'oso-staff']}>
+              <ProtectedRoute requiredPermission={['users.view', 'users.manage']} allowedRoles={['admin', 'chairman', 'vice-chairman', 'vice chairman', 'oso-staff']}>
                 <ListOfOrganizations />
               </ProtectedRoute>
             } />
 
-            {/* Admin only */}
+            {/* User & Role Management */}
             <Route path="/users" element={
-              <ProtectedRoute allowedRoles={['admin']}>
+              <ProtectedRoute requiredPermission={['users.manage', 'roles.manage']} allowedRoles={['admin']}>
                 <UserManagement />
               </ProtectedRoute>
             } />
-            <Route path="/admin/announcements" element={
+
+            {/* Audit Trail */}
+            <Route path="/admin/audit-trail" element={
               <ProtectedRoute allowedRoles={['admin']}>
+                <AuditTrailPage />
+              </ProtectedRoute>
+            } />
+
+            {/* Announcement Management */}
+            <Route path="/admin/announcements" element={
+              <ProtectedRoute requiredPermission={['announcements.view', 'announcements.manage']} allowedRoles={['admin']}>
                 <AnnouncementManagement />
               </ProtectedRoute>
             } />
+
             {/* Academic Dates - Distinct Pages */}
             <Route path="/admin/academic-dates" element={
-              <ProtectedRoute allowedRoles={['admin', 'chairman', 'vice-chairman']}>
+              <ProtectedRoute requiredPermission={['academic.view', 'academic.manage']} allowedRoles={['admin', 'chairman', 'vice-chairman']}>
                 <Navigate to="/admin/academic-dates/school-year" replace />
               </ProtectedRoute>
             } />
             <Route path="/admin/academic-dates/school-year" element={
-              <ProtectedRoute allowedRoles={['admin', 'chairman', 'vice-chairman']}>
+              <ProtectedRoute requiredPermission={['academic.view', 'academic.manage']} allowedRoles={['admin', 'chairman', 'vice-chairman']}>
                 <SchoolYearPage />
               </ProtectedRoute>
             } />
             <Route path="/admin/academic-dates/events" element={
-              <ProtectedRoute allowedRoles={['admin', 'chairman', 'vice-chairman']}>
+              <ProtectedRoute requiredPermission={['academic.view', 'academic.manage']} allowedRoles={['admin', 'chairman', 'vice-chairman']}>
                 <AcademicEventsPage />
               </ProtectedRoute>
             } />
             <Route path="/admin/academic-dates/submission-windows" element={
-              <ProtectedRoute allowedRoles={['admin', 'chairman', 'vice-chairman']}>
+              <ProtectedRoute requiredPermission={['academic.view', 'academic.manage']} allowedRoles={['admin', 'chairman', 'vice-chairman']}>
                 <SubmissionWindowsPage />
               </ProtectedRoute>
             } />
             <Route path="/admin/academic-dates/organization-activities" element={
-              <ProtectedRoute allowedRoles={['admin', 'chairman', 'vice-chairman']}>
+              <ProtectedRoute requiredPermission={['academic.view', 'academic.manage']} allowedRoles={['admin', 'chairman', 'vice-chairman']}>
                 <OrganizationActivitiesPage />
               </ProtectedRoute>
             } />
             <Route path="/admin/academic-settings" element={
-              <ProtectedRoute allowedRoles={['admin', 'chairman', 'vice-chairman']}>
+              <ProtectedRoute requiredPermission={['academic.view', 'academic.manage']} allowedRoles={['admin', 'chairman', 'vice-chairman']}>
                 <AcademicSettings />
               </ProtectedRoute>
             } />
             <Route path="/admin/academic-settings/:tab" element={
-              <ProtectedRoute allowedRoles={['admin', 'chairman', 'vice-chairman']}>
+              <ProtectedRoute requiredPermission={['academic.view', 'academic.manage']} allowedRoles={['admin', 'chairman', 'vice-chairman']}>
                 <AcademicSettings />
               </ProtectedRoute>
             } />
 
-            {/* Role specific */}
+            {/* Completed Documents */}
             <Route path="/completed" element={
-              <ProtectedRoute allowedRoles={['chairman', 'vice-chairman', 'org-president', 'admin']}>
+              <ProtectedRoute requiredPermission={['documents.view', 'documents.evaluate', 'documents.approve']} allowedRoles={['chairman', 'vice-chairman', 'org-president', 'admin']}>
                 <Completed />
               </ProtectedRoute>
             } />
             
+            {/* Submit Documents */}
             <Route path="/submit" element={
-              <ProtectedRoute allowedRoles={['org-president']}>
+              <ProtectedRoute requiredPermission="documents.submit" allowedRoles={['org-president']}>
                 <SubmitNewDocuments />
               </ProtectedRoute>
             } />

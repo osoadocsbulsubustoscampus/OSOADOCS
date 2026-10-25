@@ -1196,6 +1196,18 @@ const DashboardLayout = () => {
             setShowMemberModal(true);
           }}
         />
+        {user?.status === 'Handed Over (Read-Only)' && (
+          <div className="bg-gradient-to-r from-amber-600 to-amber-700 text-white px-4 py-2.5 shadow-sm flex items-center justify-between text-xs sm:text-sm font-medium z-10 shrink-0">
+            <div className="flex items-center gap-2 max-w-[96rem] mx-auto w-full">
+              <span className="p-1 bg-white/20 rounded-md shrink-0">
+                <ShieldAlert size={16} className="text-white" />
+              </span>
+              <span>
+                <strong>Read-Only Mode:</strong> Administrator ownership has been transferred to the new Primary Administrator. Your account has read-only viewing access for institutional reference.
+              </span>
+            </div>
+          </div>
+        )}
         <main className="flex-1 overflow-y-auto p-2 sm:p-4 md:p-6 relative">
           <PageTransition>
             <div className="max-w-[96rem] mx-auto">

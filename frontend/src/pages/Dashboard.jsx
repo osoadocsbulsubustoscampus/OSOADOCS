@@ -5,6 +5,7 @@ import { useNavigate } from 'react-router-dom';
 import { supabase } from '../supabaseClient';
 import ReportPreviewModal from '../components/ReportPreviewModal';
 import { getReportGeneratorName } from '../utils/submissionLogUtils';
+import { formatRoleName } from '../utils/permissions';
 import {
   FileText, CheckCircle, Clock, AlertCircle, RefreshCcw,
   ChevronRight, BarChart2, Activity, UserCheck, Calendar, Bell, XCircle, Inbox,
@@ -926,7 +927,7 @@ const AdminDashboardView = () => {
 // ─── Chairman / Vice Chairman Dashboard ───────────────────────────────────────
 
 const ChairmanDashboardView = ({ role }) => {
-  const { user } = useAuth();
+  const { user, roles, hasPermission } = useAuth();
   const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
   const [data, setData] = useState(null);
@@ -993,7 +994,7 @@ const ChairmanDashboardView = ({ role }) => {
       ];
     });
 
-    const roleLabel = role === 'vice-chairman' ? 'Vice Chairman' : 'Chairman';
+    const roleLabel = role === 'vice-chairman' ? 'Vice Chairman' : role === 'chairman' ? 'Chairman' : formatRoleName(role, roles);
     setReportData({
       title: 'In-Progress Documents Report',
       stats: reportStats,
@@ -1025,7 +1026,7 @@ const ChairmanDashboardView = ({ role }) => {
       `${avg} avg`
     ]);
 
-    const roleLabel = role === 'vice-chairman' ? 'Vice Chairman' : 'Chairman';
+    const roleLabel = role === 'vice-chairman' ? 'Vice Chairman' : role === 'chairman' ? 'Chairman' : formatRoleName(role, roles);
     setReportData({
       title: `${roleLabel} Dashboard - Common Errors & Revision Analysis Report`,
       stats: reportStats,
@@ -1080,7 +1081,7 @@ const ChairmanDashboardView = ({ role }) => {
   if (!data || !data.stats) return <div className="p-8">Failed to load dashboard.</div>;
 
   const { stats, announcements } = data;
-  const roleLabel = role === 'vice-chairman' ? 'Vice Chairman' : 'Chairman';
+  const roleLabel = role === 'vice-chairman' ? 'Vice Chairman' : role === 'chairman' ? 'Chairman' : formatRoleName(role, roles);
 
   return (
     <div className="pb-32">
@@ -1099,7 +1100,13 @@ const ChairmanDashboardView = ({ role }) => {
 
           <div className="relative z-10 flex flex-col md:flex-row justify-between items-start md:items-end gap-6 mb-10">
             <div>
-              <h1 className="text-3xl md:text-4xl font-black text-white tracking-tight mb-2 drop-shadow-md uppercase">OSO STAFF DASHBOARD</h1>
+              <h1 className="text-3xl md:text-4xl font-black text-white tracking-tight mb-2 drop-shadow-md uppercase">
+                {role === 'chairman'
+                  ? 'OSO CHAIRMAN DASHBOARD'
+                  : role === 'vice-chairman'
+                    ? 'OSO VICE-CHAIRMAN DASHBOARD'
+                    : `${roleLabel.toUpperCase()} DASHBOARD`}
+              </h1>
               <p className="text-gray-200 font-bold text-lg drop-shadow-sm">Document Review and Processing Overview</p>
             </div>
             <div className="flex flex-wrap items-center gap-3">
@@ -1124,7 +1131,16 @@ const ChairmanDashboardView = ({ role }) => {
 
 
           <div className="relative z-10 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-            <div className="bg-white rounded-2xl p-6 shadow-md border border-gray-100 flex items-center gap-4 hover:shadow-lg transition-shadow cursor-pointer" onClick={() => navigate('/user-management')}>
+            <div
+              className="bg-white rounded-2xl p-6 shadow-md border border-gray-100 flex items-center gap-4 hover:shadow-lg transition-shadow cursor-pointer"
+              onClick={() => {
+                if (hasPermission('users.manage')) {
+                  navigate('/users');
+                } else if (hasPermission('users.view')) {
+                  navigate('/organizations');
+                }
+              }}
+            >
               <div className="w-12 h-12 rounded-xl bg-pink-50 text-pink-500 flex items-center justify-center shrink-0">
                 <UserCheck size={24} />
               </div>
@@ -1133,7 +1149,16 @@ const ChairmanDashboardView = ({ role }) => {
                 <p className="text-2xl font-black text-gray-800">{stats.statistics?.eligibleForRenewalCount || 0}</p>
               </div>
             </div>
-            <div className="bg-white rounded-2xl p-6 shadow-md border border-gray-100 flex items-center gap-4 hover:shadow-lg transition-shadow cursor-pointer" onClick={() => navigate('/inbox')}>
+            <div
+              className="bg-white rounded-2xl p-6 shadow-md border border-gray-100 flex items-center gap-4 hover:shadow-lg transition-shadow cursor-pointer"
+              onClick={() => {
+                if (hasPermission('documents.view') || hasPermission('documents.evaluate')) {
+                  navigate('/inbox');
+                } else {
+                  navigate('/my-documents');
+                }
+              }}
+            >
               <div className="w-12 h-12 rounded-xl bg-blue-50 text-blue-500 flex items-center justify-center shrink-0">
                 <Activity size={24} />
               </div>
@@ -1783,19 +1808,24 @@ const OrgDashboardView = () => {
 // ─── Main Dashboard Router ────────────────────────────────────────────────────
 
 const Dashboard = () => {
-  const { user } = useAuth();
+  const { user, hasPermission } = useAuth();
 
   if (user?.role === 'admin') return <AdminDashboardView />;
   if (user?.role === 'chairman') return <ChairmanDashboardView role="chairman" />;
   if (user?.role === 'vice-chairman') return <ChairmanDashboardView role="vice-chairman" />;
   if (user?.role === 'org-president') return <OrgDashboardView />;
 
-  return (
-    <div className="p-8">
-      <h1 className="text-3xl font-bold text-gray-800">Dashboard</h1>
-      <p className="text-gray-500 mt-2">No dashboard available for your role.</p>
-    </div>
-  );
+  // Dynamic Routing for Custom or Newly Created Roles:
+  // If the role has "Submit Proposals & Reports", it means this user is a student org submitter.
+  // Their dashboard shows only their own organization's document data.
+  const isSubmitter = hasPermission('documents.submit') || user?.role === 'org-president';
+  if (isSubmitter) {
+    return <OrgDashboardView />;
+  }
+
+  // Otherwise, it is an institutional staff / reviewer / personnel role.
+  // Show the general staff / Chairman dashboard with institutional overview, review pipeline, and stats.
+  return <ChairmanDashboardView role={user?.role} />;
 };
 
 export default Dashboard;

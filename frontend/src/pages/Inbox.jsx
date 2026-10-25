@@ -3,6 +3,7 @@ import { useAuth } from '../context/AuthContext';
 import { supabase } from '../supabaseClient';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { transitionSubmission } from '../services/submissionService';
+import { logAuditEvent } from '../services/auditService';
 import SubmissionTimeline from '../components/SubmissionTimeline';
 import { parseObjectivesList, calculateProposalDuration, filterLatestBatchFiles } from '../utils/submissionLogUtils';
 import PageHeader from '../components/PageHeader';
@@ -258,10 +259,15 @@ const mapInboxSubmission = (sub, viewer, subtypesMap = {}) => {
 };
 
 export const Inbox = () => {
-  const { user } = useAuth();
+  const { user, isReadOnlyAdmin, hasPermission } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
-  const isOsoStaff = user?.role === 'chairman' || user?.role === 'vice-chairman';
+  const canEvaluateDocuments = !isReadOnlyAdmin && (
+    user?.role === 'admin' ||
+    hasPermission('documents.evaluate') ||
+    ['chairman', 'vice-chairman'].includes(user?.role)
+  );
+  const isOsoStaff = user?.role === 'chairman' || user?.role === 'vice-chairman' || (user?.role !== 'admin' && canEvaluateDocuments);
   
   const isSuspended = Boolean(user?.status && user.status.startsWith('Suspended'));
   const suspensionReason = isSuspended && user.status.includes(':') 
@@ -651,7 +657,7 @@ export const Inbox = () => {
 
   const logDocumentViewed = async (doc) => {
     const role = String(user?.role || '').toLowerCase();
-    const allowed = role === 'admin' || role === 'chairman' || role === 'vice chairman' || role === 'vice-chairman';
+    const allowed = role === 'admin' || role === 'chairman' || role === 'vice chairman' || role === 'vice-chairman' || hasPermission('documents.view') || hasPermission('documents.evaluate');
     if (!allowed) return;
     if (!doc?.id || !user?.id) return;
     try {
@@ -848,6 +854,10 @@ export const Inbox = () => {
   };
 
   const handleApproveReportFile = () => {
+    if (isReadOnlyAdmin) {
+      showToast('Action disabled: Handed-over administrator account is in Read-Only mode.');
+      return;
+    }
     if (!reportPreviewFile) return;
     const fileId = reportPreviewFile.id || reportPreviewFile.path || reportPreviewFile.name;
     setReportDecisions((prev) => ({
@@ -863,6 +873,10 @@ export const Inbox = () => {
   };
 
   const handleReturnReportFile = () => {
+    if (isReadOnlyAdmin) {
+      showToast('Action disabled: Handed-over administrator account is in Read-Only mode.');
+      return;
+    }
     if (!reportPreviewFile) return;
     if (!reportPreviewAction) {
       showToast('Please select a Review Action before returning.');
@@ -1312,6 +1326,14 @@ export const Inbox = () => {
   }, [inboxData, location.state, location.search, location.pathname, navigate, loading, user]);
 
   const handleApproveSubmission = async (comments = '') => {
+    if (!canEvaluateDocuments) {
+      showToast('You do not have permission to evaluate or decide documents.');
+      return;
+    }
+    if (isReadOnlyAdmin) {
+      showToast('Action disabled: Handed-over administrator account is in Read-Only mode.');
+      return;
+    }
     if (!selectedDoc) return;
     try {
       setLoading(true);
@@ -1346,6 +1368,14 @@ export const Inbox = () => {
   };
 
   const handleReturnSubmission = async (comments = '') => {
+    if (!canEvaluateDocuments) {
+      showToast('You do not have permission to evaluate or decide documents.');
+      return;
+    }
+    if (isReadOnlyAdmin) {
+      showToast('Action disabled: Handed-over administrator account is in Read-Only mode.');
+      return;
+    }
     if (!selectedDoc) return;
     try {
       setLoading(true);
@@ -1389,6 +1419,14 @@ export const Inbox = () => {
   };
 
   const handleReportReviewSubmit = async () => {
+    if (!canEvaluateDocuments) {
+      showToast('You do not have permission to evaluate or decide documents.');
+      return;
+    }
+    if (isReadOnlyAdmin) {
+      showToast('Action disabled: Handed-over administrator account is in Read-Only mode.');
+      return;
+    }
     if (!selectedDoc) return;
 
     // Collect all report items to validate
@@ -1484,6 +1522,20 @@ export const Inbox = () => {
           created_at: new Date().toISOString()
         }]);
 
+        await logAuditEvent({
+          module: 'DOCUMENTS',
+          action_type: 'REPORT_APPROVED',
+          action_label: `Approved Accomplishment & Financial Reports for "${selectedDoc.title || selectedDoc.tracking_number}"`,
+          target_id: String(submissionId),
+          target_name: selectedDoc.title || selectedDoc.tracking_number,
+          details: {
+            tracking_number: selectedDoc.tracking_number,
+            organization_name: selectedDoc.senderAbbr || selectedDoc.raw?.users?.org_name,
+            files_count: allItems.length,
+          },
+          user,
+        });
+
         showToast('Accomplishment and Financial Reports approved! Document completed.');
       } else {
         // One or more files returned -> Return to Org President with detailed remarks
@@ -1531,6 +1583,20 @@ export const Inbox = () => {
           comment: combinedRemarks,
           created_at: new Date().toISOString()
         }]);
+
+        await logAuditEvent({
+          module: 'DOCUMENTS',
+          action_type: 'REPORT_RETURNED',
+          action_label: `Returned Reports for "${selectedDoc.title || selectedDoc.tracking_number}" for revision`,
+          target_id: String(submissionId),
+          target_name: selectedDoc.title || selectedDoc.tracking_number,
+          details: {
+            tracking_number: selectedDoc.tracking_number,
+            organization_name: selectedDoc.senderAbbr || selectedDoc.raw?.users?.org_name,
+            remarks: combinedRemarks,
+          },
+          user,
+        });
 
         showToast('Reports returned to Organization President for revisions.');
       }
@@ -1709,6 +1775,14 @@ export const Inbox = () => {
 
 
   const handleDisapproveSubmission = async (comments = '') => {
+    if (!canEvaluateDocuments) {
+      showToast('You do not have permission to evaluate or decide documents.');
+      return;
+    }
+    if (isReadOnlyAdmin) {
+      showToast('Action disabled: Handed-over administrator account is in Read-Only mode.');
+      return;
+    }
     if (!selectedDoc) return;
     try {
       setLoading(true);
@@ -1738,6 +1812,10 @@ export const Inbox = () => {
   };
 
   const handleSaveAttachmentFeedback = () => {
+    if (isReadOnlyAdmin) {
+      showToast('Action disabled: Handed-over administrator account is in Read-Only mode.');
+      return;
+    }
     if (!previewFile || !selectedDoc || !reviewAction) return;
     const currentStatusStr = String(selectedDoc?.raw?.status || selectedDoc?.status || '').toLowerCase().trim();
     if (['approved', 'returned', 'disapproved', 'completed', 'rejected'].includes(currentStatusStr) || currentStatusStr.includes('approved') || currentStatusStr.includes('returned')) {
@@ -1766,6 +1844,10 @@ export const Inbox = () => {
   };
 
   const handleApproveAttachment = () => {
+    if (isReadOnlyAdmin) {
+      showToast('Action disabled: Handed-over administrator account is in Read-Only mode.');
+      return;
+    }
     if (!previewFile || !selectedDoc) return;
     const currentStatusStr = String(selectedDoc?.raw?.status || selectedDoc?.status || '').toLowerCase().trim();
     if (['approved', 'returned', 'disapproved', 'completed', 'rejected'].includes(currentStatusStr) || currentStatusStr.includes('approved') || currentStatusStr.includes('returned')) {
@@ -2608,7 +2690,7 @@ export const Inbox = () => {
                 </div>
               )}
 
-              {user?.role !== 'org-president' && (
+              {user?.role !== 'org-president' && canEvaluateDocuments && (
                 <div className="flex justify-end pt-3 mt-3 border-t border-gray-100">
                   <button
                     type="button"
@@ -2726,6 +2808,23 @@ export const Inbox = () => {
           const disableActions = disabledByReview || disabledByVersion;
           const disableApprove = disableActions || hasLocallyReturnedAttachments || selectedIncompleteReqs.length > 0 || !isPreviewLoaded;
           const disableReturn = disableActions || !hasReturnedAttachments;
+          if (!canEvaluateDocuments) {
+            return null;
+          }
+
+          if (isReadOnlyAdmin) {
+            return (
+              <div className="fixed bottom-3 sm:bottom-10 left-1/2 -translate-x-1/2 z-50 w-[95vw] sm:w-auto flex justify-center">
+                <div className="bg-amber-600/95 text-white backdrop-blur-2xl px-6 py-4 rounded-2xl sm:rounded-[2rem] border border-amber-400 shadow-2xl flex items-center justify-center gap-3 animate-in slide-in-from-bottom-12 duration-500">
+                  <ShieldAlert size={20} className="text-amber-200 shrink-0" />
+                  <span className="font-bold text-xs uppercase tracking-wider">
+                    Read-Only Mode: Primary Administrator ownership transferred. Document decision actions are view-only.
+                  </span>
+                </div>
+              </div>
+            );
+          }
+
           const isReportReview =
             statusLower.includes('pending report') ||
             statusLower.includes('report review') ||
@@ -3010,6 +3109,37 @@ export const Inbox = () => {
                         );
                       }
 
+                      if (!canEvaluateDocuments) {
+                        return (
+                          <div className="space-y-6 flex flex-col justify-between h-full">
+                            <div className="space-y-4">
+                              <div>
+                                <h4 className="font-bold text-gray-800 text-base mb-1">Attachment Information</h4>
+                                <p className="text-gray-400 text-xs leading-relaxed">
+                                  Viewing report in read-only mode.
+                                </p>
+                              </div>
+                              <div className="h-[1px] bg-gray-100"></div>
+                              <div className="bg-gray-50 border border-gray-200 rounded-xl p-4 text-center">
+                                <p className="text-xs font-bold text-gray-700 uppercase tracking-wide">Read Only</p>
+                                <p className="text-[11px] text-gray-500 mt-1">
+                                  You do not have permission to evaluate or decide report documents.
+                                </p>
+                              </div>
+                            </div>
+                            <div className="pt-4 border-t border-gray-100">
+                              <button
+                                type="button"
+                                onClick={() => setReportPreviewFile(null)}
+                                className="w-full py-3 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl font-bold transition-all text-xs tracking-wider uppercase cursor-pointer"
+                              >
+                                Close Preview
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      }
+
                       return (
                         <>
                           <div className="space-y-6">
@@ -3077,43 +3207,53 @@ export const Inbox = () => {
 
                           {/* Actions Buttons matching user screenshot */}
                           <div className="space-y-3 pt-6 border-t border-gray-100 mt-6">
-                            {(() => {
-                              const fileId = reportPreviewFile?.id || reportPreviewFile?.path || reportPreviewFile?.name;
-                              const currentDecision = reportDecisions[fileId]?.decision;
-                              if (currentDecision === 'approve') {
-                                return (
-                                  <div className="bg-green-50 border border-green-100 rounded-xl p-3 text-center mb-1">
-                                    <CheckCircle size={18} className="text-green-600 mx-auto mb-1" />
-                                    <p className="text-xs font-bold text-green-700 uppercase tracking-wider">Already Approved</p>
-                                    <p className="text-[11px] text-green-600 mt-0.5">No re-approval needed. You can still return this file if you find an issue.</p>
-                                  </div>
-                                );
-                              }
-                              return null;
-                            })()}
+                            {isReadOnlyAdmin ? (
+                              <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-center mt-2">
+                                <ShieldAlert size={20} className="text-amber-500 mx-auto mb-2" />
+                                <p className="text-xs font-bold text-amber-700 uppercase tracking-wider">Read-Only Mode</p>
+                                <p className="text-xs text-amber-600 mt-1">Review actions are disabled because administrator ownership has been transferred.</p>
+                              </div>
+                            ) : (
+                              <>
+                                {(() => {
+                                  const fileId = reportPreviewFile?.id || reportPreviewFile?.path || reportPreviewFile?.name;
+                                  const currentDecision = reportDecisions[fileId]?.decision;
+                                  if (currentDecision === 'approve') {
+                                    return (
+                                      <div className="bg-green-50 border border-green-100 rounded-xl p-3 text-center mb-1">
+                                        <CheckCircle size={18} className="text-green-600 mx-auto mb-1" />
+                                        <p className="text-xs font-bold text-green-700 uppercase tracking-wider">Already Approved</p>
+                                        <p className="text-[11px] text-green-600 mt-0.5">No re-approval needed. You can still return this file if you find an issue.</p>
+                                      </div>
+                                    );
+                                  }
+                                  return null;
+                                })()}
 
-                            <button 
-                              type="button"
-                              onClick={handleApproveReportFile}
-                              className="w-full flex items-center justify-center gap-2 px-6 py-3.5 bg-green-600 hover:bg-green-700 text-white rounded-xl font-bold transition-all shadow-lg shadow-green-600/10 uppercase text-xs tracking-wider cursor-pointer hover:scale-[1.01] active:scale-95"
-                            >
-                              <CheckCircle size={16} />
-                              <span>Approve Attachment</span>
-                            </button>
-                            
-                            <button 
-                              type="button"
-                              onClick={handleReturnReportFile}
-                              disabled={!reportPreviewAction}
-                              className={`w-full flex items-center justify-center gap-2 px-6 py-3.5 rounded-xl font-bold transition-all shadow-lg shadow-amber-500/10 uppercase text-xs tracking-wider ${
-                                !reportPreviewAction
-                                  ? 'bg-[#fed7aa] text-white opacity-80 cursor-not-allowed'
-                                  : 'bg-amber-500 hover:bg-amber-600 text-white cursor-pointer hover:scale-[1.01] active:scale-95'
-                              }`}
-                            >
-                              <RotateCcw size={16} />
-                              <span>Return for Edits</span>
-                            </button>
+                                <button 
+                                  type="button"
+                                  onClick={handleApproveReportFile}
+                                  className="w-full flex items-center justify-center gap-2 px-6 py-3.5 bg-green-600 hover:bg-green-700 text-white rounded-xl font-bold transition-all shadow-lg shadow-green-600/10 uppercase text-xs tracking-wider cursor-pointer hover:scale-[1.01] active:scale-95"
+                                >
+                                  <CheckCircle size={16} />
+                                  <span>Approve Attachment</span>
+                                </button>
+                                
+                                <button 
+                                  type="button"
+                                  onClick={handleReturnReportFile}
+                                  disabled={!reportPreviewAction}
+                                  className={`w-full flex items-center justify-center gap-2 px-6 py-3.5 rounded-xl font-bold transition-all shadow-lg shadow-amber-500/10 uppercase text-xs tracking-wider ${
+                                    !reportPreviewAction
+                                      ? 'bg-[#fed7aa] text-white opacity-80 cursor-not-allowed'
+                                      : 'bg-amber-500 hover:bg-amber-600 text-white cursor-pointer hover:scale-[1.01] active:scale-95'
+                                  }`}
+                                >
+                                  <RotateCcw size={16} />
+                                  <span>Return for Edits</span>
+                                </button>
+                              </>
+                            )}
                           </div>
                         </>
                       );
@@ -3232,6 +3372,7 @@ export const Inbox = () => {
                           currentStatusStr.includes('accomplishment');
 
                         const canReviewCurrentAttachment = Boolean(
+                          canEvaluateDocuments &&
                           isLatestVersion &&
                           userRoleNorm &&
                           userRoleNorm !== 'org-president' &&
@@ -3293,6 +3434,7 @@ export const Inbox = () => {
                           currentStatusStr.includes('accomplishment');
 
                         const canReviewCurrentAttachment = Boolean(
+                          canEvaluateDocuments &&
                           isLatestVersion &&
                           userRoleNorm &&
                           userRoleNorm !== 'org-president' &&
@@ -3380,6 +3522,7 @@ export const Inbox = () => {
                         currentStatusStr.includes('accomplishment');
 
                       const canReviewCurrentAttachment = Boolean(
+                        canEvaluateDocuments &&
                         isLatestVersion &&
                         userRoleNorm &&
                         userRoleNorm !== 'org-president' &&
@@ -3440,7 +3583,21 @@ export const Inbox = () => {
                           <div className="bg-gray-50 border border-gray-100 rounded-xl p-4 text-center mt-6">
                             <FileText size={20} className="text-gray-400 mx-auto mb-2" />
                             <p className="text-xs font-bold text-gray-600 uppercase tracking-wider">Read Only</p>
-                            <p className="text-xs text-gray-500 mt-1">Attachment review actions are not available for this document.</p>
+                            <p className="text-xs text-gray-500 mt-1">
+                              {!canEvaluateDocuments
+                                ? 'You do not have permission to evaluate or decide attached files.'
+                                : 'Attachment review actions are not available for this document.'}
+                            </p>
+                          </div>
+                        );
+                      }
+
+                      if (isReadOnlyAdmin) {
+                        return (
+                          <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-center mt-6">
+                            <ShieldAlert size={20} className="text-amber-500 mx-auto mb-2" />
+                            <p className="text-xs font-bold text-amber-700 uppercase tracking-wider">Read-Only Mode</p>
+                            <p className="text-xs text-amber-600 mt-1">Review actions are disabled because administrator ownership has been transferred.</p>
                           </div>
                         );
                       }
@@ -3484,7 +3641,7 @@ export const Inbox = () => {
           );
         })()}
       {/* Workflow Decision Confirmation Modal inside Selected Doc view */}
-      {isReturnModalOpen && (() => {
+      {isReturnModalOpen && canEvaluateDocuments && (() => {
         let modalIcon = <RotateCcw size={24} />;
         let modalIconBg = 'bg-amber-50 text-amber-500';
         let modalTitle = 'Return Submission';
@@ -3786,7 +3943,7 @@ export const Inbox = () => {
         </button>
       </div>
       {/* Workflow Decision Confirmation Modal */}
-      {isReturnModalOpen && (() => {
+      {isReturnModalOpen && canEvaluateDocuments && (() => {
         let modalIcon = <RotateCcw size={24} />;
         let modalIconBg = 'bg-amber-50 text-amber-500';
         let modalTitle = 'Return Submission';
