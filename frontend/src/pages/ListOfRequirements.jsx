@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import * as reqService from '../services/requirementService';
@@ -389,6 +389,82 @@ const ListOfRequirements = () => {
       hour12: true,
     });
   };
+
+  const formatDuration = (startStr, endStr) => {
+    if (!startStr) return '';
+    const start = new Date(startStr);
+    const end = endStr ? new Date(endStr) : new Date();
+    if (isNaN(start.getTime()) || isNaN(end.getTime())) return '';
+
+    const diffMs = Math.max(0, end.getTime() - start.getTime());
+    const diffSec = Math.floor(diffMs / 1000);
+    const diffMin = Math.floor(diffSec / 60);
+    const diffHours = Math.floor(diffMin / 60);
+    const diffDays = Math.floor(diffHours / 24);
+
+    if (diffDays > 0) {
+      return `${diffDays} ${diffDays === 1 ? 'day' : 'days'}${diffHours % 24 > 0 ? ` ${diffHours % 24}h` : ''}`;
+    }
+    if (diffHours > 0) {
+      return `${diffHours} ${diffHours === 1 ? 'hr' : 'hrs'}${diffMin % 60 > 0 ? ` ${diffMin % 60}m` : ''}`;
+    }
+    if (diffMin > 0) {
+      return `${diffMin} ${diffMin === 1 ? 'min' : 'mins'}`;
+    }
+    return '< 1 min';
+  };
+
+  // Compute active usage period (set date to replace date) for each template log
+  const logRangeMap = useMemo(() => {
+    const groups = {};
+    (templateLogs || []).forEach((log) => {
+      const reqId = log.requirement_id || 'general';
+      if (!groups[reqId]) groups[reqId] = [];
+      groups[reqId].push(log);
+    });
+
+    const map = {};
+
+    Object.keys(groups).forEach((reqId) => {
+      // Sort chronological ascending (oldest to newest) to trace replacement chain
+      const sorted = [...groups[reqId]].sort(
+        (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+      );
+
+      sorted.forEach((log, idx) => {
+        const isLastInTimeline = idx === sorted.length - 1;
+        const setAt = log.created_at;
+        let replacedAt = null;
+        let replacedBy = null;
+        let isActive = false;
+
+        if (log.action_type === 'TEMPLATE_REMOVED') {
+          replacedAt = log.created_at;
+          isActive = false;
+        } else if (isLastInTimeline) {
+          isActive = true;
+          replacedAt = null;
+        } else {
+          const nextLog = sorted[idx + 1];
+          replacedAt = nextLog.created_at;
+          replacedBy = nextLog.template_name || nextLog.action_type;
+          isActive = false;
+        }
+
+        const duration = formatDuration(setAt, replacedAt);
+
+        map[log.id] = {
+          setAt,
+          replacedAt,
+          replacedBy,
+          isActive,
+          duration,
+        };
+      });
+    });
+
+    return map;
+  }, [templateLogs]);
 
   const getRoleBadge = (role) => {
     const r = String(role || '').toLowerCase();
@@ -986,15 +1062,22 @@ const ListOfRequirements = () => {
                   const isUploaded = log.action_type === 'TEMPLATE_UPLOADED';
                   const isRemoved = log.action_type === 'TEMPLATE_REMOVED';
                   const isCurrent = index === 0;
+                  const rangeInfo = logRangeMap[log.id] || {
+                    setAt: log.created_at,
+                    replacedAt: null,
+                    replacedBy: null,
+                    isActive: isCurrent,
+                    duration: '',
+                  };
 
                   return (
                     <div
                       key={log.id}
-                      className="bg-white border border-gray-200 rounded-xl p-3.5 space-y-2.5 shadow-2xs hover:border-gray-300 transition-colors"
+                      className="bg-white border border-gray-200 rounded-xl p-3.5 space-y-3 shadow-2xs hover:border-gray-300 transition-colors"
                     >
                       {/* Top Bar: Action, Active Badge, Date */}
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="flex items-center gap-2 min-w-0">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 min-w-0 flex-wrap">
                           <span
                             className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
                               isReplaced
@@ -1009,9 +1092,14 @@ const ListOfRequirements = () => {
                             {log.action_type.replace(/_/g, ' ')}
                           </span>
 
-                          {isCurrent && (
-                            <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-emerald-50 text-emerald-700 border border-emerald-200">
+                          {rangeInfo.isActive && !isRemoved ? (
+                            <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-emerald-50 text-emerald-700 border border-emerald-200 flex items-center gap-1">
+                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
                               Active Version
+                            </span>
+                          ) : (
+                            <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-gray-100 text-gray-600 border border-gray-200">
+                              Superseded
                             </span>
                           )}
 
@@ -1022,11 +1110,58 @@ const ListOfRequirements = () => {
                           )}
                         </div>
 
-                        <span className="text-[11px] text-gray-400 font-medium shrink-0 flex items-center gap-1">
+                        <span className="text-[11px] text-gray-400 font-medium shrink-0 flex items-center gap-1 self-start sm:self-auto">
                           <Clock size={11} />
-                          {formatLogDate(log.created_at)}
+                          Logged: {formatLogDate(log.created_at)}
                         </span>
                       </div>
+
+                      {/* Usage Period Date Range Banner */}
+                      {log.action_type !== 'TEMPLATE_REMOVED' ? (
+                        <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 bg-gradient-to-r from-emerald-50/60 to-gray-50 border border-emerald-100/70 rounded-xl text-xs">
+                          <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
+                            <Calendar size={13} className="text-primary-green shrink-0" />
+                            <span className="text-[11px] font-bold text-gray-500 uppercase tracking-wider">Template In Use:</span>
+                            <span className="font-bold text-gray-800 bg-white px-2 py-0.5 rounded-md border border-gray-200/60 shadow-2xs">
+                              {formatLogDate(rangeInfo.setAt)}
+                            </span>
+                            <ArrowRight size={12} className="text-gray-400 shrink-0" />
+                            {rangeInfo.replacedAt ? (
+                              <span className="font-bold text-gray-700 bg-white px-2 py-0.5 rounded-md border border-gray-200/60 shadow-2xs">
+                                {formatLogDate(rangeInfo.replacedAt)}
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 font-extrabold text-emerald-800 bg-emerald-100 px-2.5 py-0.5 rounded-md text-[11px] border border-emerald-200 shadow-2xs">
+                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-600 animate-pulse" />
+                                Present (Currently in use)
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="flex items-center gap-2 text-[11px] text-gray-500 font-medium shrink-0">
+                            <span>
+                              {rangeInfo.isActive ? 'Active for ' : 'Used for '}
+                              <strong className="text-gray-800 font-bold">{rangeInfo.duration || '0m'}</strong>
+                            </span>
+                            {rangeInfo.replacedAt && (
+                              <span className="text-amber-800 font-semibold bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200 text-[10px]">
+                                Replaced
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="px-3 py-2 bg-rose-50 border border-rose-100 rounded-xl text-xs text-rose-700 flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-1.5">
+                            <Clock size={13} className="text-rose-500 shrink-0" />
+                            <span className="font-bold">Template Retired / Removed on:</span>
+                            <span className="font-semibold">{formatLogDate(log.created_at)}</span>
+                          </div>
+                          <span className="text-[10px] font-bold uppercase bg-rose-100 text-rose-800 px-2 py-0.5 rounded">
+                            Inactive
+                          </span>
+                        </div>
+                      )}
 
                       {/* File Details */}
                       {isReplaced ? (
