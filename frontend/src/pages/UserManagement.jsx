@@ -320,6 +320,8 @@ const UserManagement = () => {
     setIsModalOpen(true);
   };
 
+  const handleAddNewUser = (type) => handleOpenModal(type);
+
   const handleEditClick = (user) => {
     setIsEditMode(true);
     setEditingUserId(user.user_id || user.id);
@@ -2011,9 +2013,9 @@ const UserManagement = () => {
                     if (activeTab === 'roles') {
                       handleOpenCreateRole();
                     } else if (activeTab === 'orgs') {
-                      handleAddNewUser('org');
+                      handleOpenModal('org');
                     } else {
-                      handleAddNewUser('admin-staff');
+                      handleOpenModal('admin-staff');
                     }
                   }}
                   className="flex items-center gap-2 px-4 py-2 bg-primary-green text-white rounded-xl hover:shadow-lg hover:shadow-primary-green/20 transition-all shadow-md font-semibold text-sm"
