@@ -1093,48 +1093,6 @@ const ListOfRequirements = () => {
                         </div>
                       </div>
 
-                      {/* Explicit Date Set and Replaced details */}
-                      {log.action_type !== 'TEMPLATE_REMOVED' ? (
-                        <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 bg-gray-50/80 border border-gray-100 rounded-xl text-xs">
-                          <div className="flex items-center gap-3 text-gray-600 flex-wrap">
-                            <div className="flex items-center gap-1">
-                              <span className="text-gray-400 font-medium">Date Set:</span>
-                              <strong className="text-gray-900 font-bold">{formatSimpleDate(rangeInfo.setAt)}</strong>
-                            </div>
-                            <span className="text-gray-300">•</span>
-                            <div className="flex items-center gap-1">
-                              <span className="text-gray-400 font-medium">Date Replaced:</span>
-                              {rangeInfo.replacedAt ? (
-                                <strong className="text-gray-900 font-bold">{formatSimpleDate(rangeInfo.replacedAt)}</strong>
-                              ) : (
-                                <span className="text-emerald-700 font-bold">Present (Currently In Use)</span>
-                              )}
-                            </div>
-                          </div>
-
-                          {rangeInfo.replacedAt ? (
-                            <span className="text-[10px] font-bold uppercase tracking-wider text-amber-800 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded">
-                              Replaced on {formatSimpleDate(rangeInfo.replacedAt)}
-                            </span>
-                          ) : (
-                            <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-800 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded">
-                              Active Template
-                            </span>
-                          )}
-                        </div>
-                      ) : (
-                        <div className="px-3 py-2 bg-rose-50 border border-rose-100 rounded-xl text-xs text-rose-700 flex items-center justify-between gap-2">
-                          <div className="flex items-center gap-1.5">
-                            <Calendar size={13} className="text-rose-500 shrink-0" />
-                            <span className="font-bold">Date Removed:</span>
-                            <span className="font-semibold">{formatSimpleDate(log.created_at)}</span>
-                          </div>
-                          <span className="text-[10px] font-bold uppercase bg-rose-100 text-rose-800 px-2 py-0.5 rounded">
-                            Inactive
-                          </span>
-                        </div>
-                      )}
-
                       {/* File Details */}
                       {isReplaced ? (
                         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-2.5 bg-gray-50 rounded-lg text-xs">
